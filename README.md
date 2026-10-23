@@ -227,6 +227,27 @@ flowchart LR
 
 上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
 
+## 从源码构建
+
+需要 Go 1.22+。
+
+```bash
+# 国内网络先换代理（只需一次）
+go env -w GOPROXY=https://goproxy.cn,direct
+
+# Windows / Linux / macOS 本机
+go build -trimpath -ldflags="-s -w -X main.appVersion=1.13.1-panel" -o wb2api ./cmd/server
+
+# 交叉编译给 Linux 服务器（静态二进制）
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o wb2api-linux-amd64 ./cmd/server
+```
+
+- `-trimpath -ldflags="-s -w"`：去掉构建路径与符号表，二进制约 10 MB
+- 版本号用 `-X main.appVersion=...` 注入，会显示在 `/panel/api/overview` 的 `version` 字段
+- **覆盖正在运行的 exe 会失败**（Windows 文件锁）：先编译到临时路径，停掉进程后再替换
+- 分发时**不要**打包 `auths/`、`data/`、`config.json`、`device_token.txt`——内含明文 accessToken / refreshToken 与 api_key
+
 ## 快速开始
 
 ### 环境要求
