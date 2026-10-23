@@ -21,6 +21,11 @@ const (
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
 	defaultCliVersion = "2.137.1"
 
+	// 国际版（WorkBuddy AI）桌面端独立版本号：实测 5.8.4 / CLI 2.161.0。
+	// 与国内版不通用——国际端点会按 UA 里的版本与平台段校验客户端身份。
+	defaultIntlClientVersion = "5.8.4"
+	defaultIntlCLIVersion    = "2.161.0"
+
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 )
@@ -60,10 +65,18 @@ func (c *Client) cliVersion() string {
 // "request illegal" 风控。官方无任何 UA 随机化，故默认确定性。
 func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {
 	platform := "WorkBuddy"
+	ver := c.clientVersion()
+	cli := c.cliVersion()
 	if a != nil && a.IsGlobal() {
-		platform = "WorkBuddy AI"
+		// 国际版桌面端 applicationName = `workbuddy-ai`（小写连字符），
+		// 不是 productName 的 `WorkBuddy AI`——后者会被判非法客户端。
+		// 版本固定取 intl 实测值：config 的 client_version 是全局单值，
+		// 无法同时表达两区版本，混用同样会被判非法。
+		platform = "workbuddy-ai"
+		ver = defaultIntlClientVersion
+		cli = defaultIntlCLIVersion
 	}
-	return "WorkBuddy/" + c.clientVersion() + " " + platform + "/" + c.clientVersion() + " CLI/" + c.cliVersion()
+	return "WorkBuddy/" + ver + " " + platform + "/" + ver + " CLI/" + cli
 }
 
 // defaultWorkBuddyUA 返回 CN 形态的默认 UA（默认账号形态即 CN，零回归兼容既有调用/测试）。
@@ -231,7 +244,7 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 		c.injectGlobalChatHeaders(req, a)
 	}
 	// 用量归属头：默认伪造 WorkBuddy 桌面端指纹（client_name="SaaS" 还原旧行为）。
-	c.injectAttribution(req)
+	c.injectAttribution(req, a)
 	// 客户端 IP 透传（仅 PassthroughIP=true 且本次请求带 IP）。
 	c.injectClientIP(req, clientIP)
 	// 设备风控头：auth 每号 > config 全局 > 文件兜底；空则不注入。
@@ -299,6 +312,15 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	req.Header.Set("X-B3-TraceId", b3Trace)
 	req.Header.Set("X-B3-SpanId", messageID[:16])
 	req.Header.Set("X-B3-Sampled", "1")
+	// 官方桌面端同时发标准 W3C/Sleuth 链路头（traceparent / b3），
+	// traceparent 的 trace-id 必须是 32 hex，非法时回落消息级 ID。
+	spanID := messageID[:16]
+	w3cTrace := b3Trace
+	if len(w3cTrace) != 32 {
+		w3cTrace = messageID
+	}
+	req.Header.Set("traceparent", "00-"+w3cTrace+"-"+spanID+"-01")
+	req.Header.Set("b3", w3cTrace+"-"+spanID+"-1")
 }
 
 // validTraceID 判断 B3 TraceId 是否合法：16 或 32 位 hex（大小写均可）。
@@ -333,17 +355,31 @@ func (c *Client) attributionClientName() string {
 // + X-IDE-Name/Type/Product="WorkBuddy" + X-IDE-Version=client_version，上游用量归因
 // 不再出现 client/agentPurpose 为空的「网关特征」。显式 ClientName="SaaS" 还原旧行为
 // （仅 X-Product="SaaS"，不设 X-IDE-*）；配其他值则四头跟随该值。
-func (c *Client) injectAttribution(req *http.Request) {
+// clientVersionFor 返回到当前账号 realm 生效的客户端版本（X-IDE-Version 用）。
+// 国际版有独立版本号，config 未显式覆盖时走 intl 默认值。
+func (c *Client) clientVersionFor(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		return defaultIntlClientVersion
+	}
+	return c.clientVersion()
+}
+
+func (c *Client) injectAttribution(req *http.Request, a *auth.Auth) {
 	name := c.attributionClientName()
 	if name == "SaaS" {
 		req.Header.Set("X-Product", "SaaS")
 		return
 	}
+	req.Header.Set("X-Agent-Intent", "craft")
 	req.Header.Set("X-Agent-Purpose", "conversation")
+	req.Header.Set("X-Agent-Type", "main")
 	req.Header.Set("X-IDE-Name", name)
 	req.Header.Set("X-IDE-Type", name)
-	req.Header.Set("X-IDE-Version", c.clientVersion())
-	req.Header.Set("X-Product", name)
+	req.Header.Set("X-IDE-Version", c.clientVersionFor(a))
+	// 官方桌面端（5.8.4 抓包）发送 X-Private-Data=true；X-Product 取 deploymentType
+	// （=SaaS），不是产品名。此前发产品名会让国际端点判为非法客户端（11140）。
+	req.Header.Set("X-Private-Data", "true")
+	req.Header.Set("X-Product", "SaaS")
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。
