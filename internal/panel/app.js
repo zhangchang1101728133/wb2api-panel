@@ -3445,17 +3445,50 @@ applyExpFold();
    编辑复用同一张表单（keyEditId 为空 = 新建），避免维护两套字段。 */
 let keyRows = [];
 let keyEditId = null;
+let keyAccounts = [];        // 账号候选（含积分，来自 /panel/api/keys）
+let keyModelCatalog = null;  // 模型目录缓存：/panel/api/models 直连上游，一次会话只拉一次
+let keyModelSelected = new Set();
+let keyModelCustom = [];
 
 function fmtNum(n) { return (Number(n) || 0).toLocaleString(); }
 function keyNum(v) { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0; }
 function shortUid(uid) { return !uid ? '' : (uid.length > 10 ? uid.slice(0, 10) + '…' : uid); }
+
+/* ── 弹窗 ─────────────────────────────────────────────────────────────
+   复用面板既有的 .veil/.dlg（积分任务、券码弹窗同一套外观），只多两种关法：
+   Esc 与点空白处。这两个只在密钥弹窗上生效，不改动其它弹窗的行为。 */
+function openVeil(id) {
+  const v = $(id);
+  if (!v) return;
+  v.classList.add('on');
+  document.body.classList.add('veil-open');
+  const f = v.querySelector('input:not([type=checkbox]):not([readonly]), select');
+  if (f) setTimeout(() => f.focus(), 60);
+}
+function closeVeil(id) {
+  const v = $(id);
+  if (!v) return;
+  v.classList.remove('on');
+  if (!document.querySelector('.veil.on')) document.body.classList.remove('veil-open');
+}
+['keyVeil', 'keySecretVeil'].forEach(id => {
+  const v = $(id);
+  if (!v) return;
+  v.addEventListener('click', e => { if (e.target === v) closeVeil(id); });
+});
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if ($('keySecretVeil') && $('keySecretVeil').classList.contains('on')) closeVeil('keySecretVeil');
+  else if ($('keyVeil') && $('keyVeil').classList.contains('on')) closeVeil('keyVeil');
+});
 
 async function loadKeys() {
   const tb = $('keysBody');
   try {
     const d = await api('keys');
     keyRows = d.keys || [];
-    fillKeyAccountOptions(d.accounts || []);
+    keyAccounts = d.accounts || [];
+    fillKeyPinOptions();
     renderKeys();
     $('keysNote').textContent = keyRows.length ? keyRows.length + ' 个密钥' : '还没有分发密钥';
   } catch (e) {
@@ -3463,21 +3496,123 @@ async function loadKeys() {
   }
 }
 
-/* 账号候选：多选框与「固定账号」下拉共用同一份列表。重载时保留已选状态，
-   否则每次刷新都会把用户刚勾的账号清空。 */
-function fillKeyAccountOptions(accts) {
-  const sel = $('keyAccounts'), pin = $('keyPin');
-  if (!sel || !pin) return;
-  const prevSel = new Set([...sel.selectedOptions].map(o => o.value));
-  const prevPin = pin.value;
-  const opt = a => '<option value="' + esc(a.uid) + '">' +
+/* ── 可用账号：勾选列表 ───────────────────────────────────────────────
+   取代 <select multiple>：原生多选框要点 Ctrl、看不到积分，勾选状态也不直观。 */
+function renderKeyAccountPick(selected) {
+  const box = $('keyAccountPick');
+  if (!box) return;
+  if (!keyAccounts.length) { box.innerHTML = '<div class="pick-empty">暂无账号</div>'; return; }
+  const sel = selected instanceof Set ? selected : new Set();
+  box.innerHTML = keyAccounts.map(a => {
+    const st = a.disabled ? '（禁用）' : (a.paused ? '（暂停）' : '');
+    return '<label class="pick-item"><input type="checkbox" value="' + esc(a.uid) + '"' +
+      (sel.has(a.uid) ? ' checked' : '') + '>' +
+      '<span class="nm">' + esc(a.label || shortUid(a.uid)) + st + '</span>' +
+      '<span class="meta">' + esc(a.realm || 'cn') + ' · ' + fmtNum(a.credits) + '</span></label>';
+  }).join('');
+}
+function pickedAccounts() {
+  const box = $('keyAccountPick');
+  return box ? [...box.querySelectorAll('input:checked')].map(i => i.value) : [];
+}
+
+/* 「固定账号」下拉：与勾选列表共用同一份账号候选。 */
+function fillKeyPinOptions() {
+  const pin = $('keyPin');
+  if (!pin) return;
+  const prev = pin.value;
+  pin.innerHTML = '<option value="">不固定</option>' + keyAccounts.map(a =>
+    '<option value="' + esc(a.uid) + '">' +
     esc('[' + (a.realm || 'cn') + '] ' + (a.label || shortUid(a.uid)) + ' · ' + fmtNum(a.credits)) +
-    (a.disabled ? '（禁用）' : (a.paused ? '（暂停）' : '')) + '</option>';
-  sel.innerHTML = accts.map(opt).join('');
-  pin.innerHTML = '<option value="">不固定</option>' + accts.map(opt).join('');
-  [...sel.options].forEach(o => { o.selected = prevSel.has(o.value); });
-  pin.value = prevPin;
-  if (pin.value !== prevPin) pin.value = '';
+    (a.disabled ? '（禁用）' : (a.paused ? '（暂停）' : '')) + '</option>').join('');
+  pin.value = [...pin.options].some(o => o.value === prev) ? prev : '';
+}
+
+/* ── 模型白名单：按真实模型目录勾选 ───────────────────────────────────
+   白名单最终仍是一组「模型 id / 通配规则」，勾选只负责产出精确 id；
+   目录外的写法（deepseek-* 之类）作为自定义规则单独展示，不静默丢掉。 */
+function modelBare(id) { const i = id.indexOf(':'); return i < 0 ? id : id.slice(i + 1); }
+function modelRealm(id) { const i = id.indexOf(':'); return i < 0 ? 'cn' : id.slice(0, i); }
+
+async function ensureKeyModelCatalog() {
+  if (keyModelCatalog) return keyModelCatalog;
+  const box = $('keyModelPick');
+  if (box) box.innerHTML = '<div class="pick-empty">正在向上游拉取模型目录…</div>';
+  try {
+    const d = await api('models');
+    keyModelCatalog = d.models || [];
+  } catch (e) {
+    keyModelCatalog = []; // 失败不缓存：下次打开弹窗重试
+    if (box) box.innerHTML = '<div class="pick-empty">模型目录拉取失败：' + esc(e.message) + '</div>';
+    return keyModelCatalog;
+  }
+  return keyModelCatalog;
+}
+
+function renderKeyModelPick() {
+  const box = $('keyModelPick');
+  if (!box) return;
+  if (!keyModelCatalog || !keyModelCatalog.length) {
+    box.innerHTML = '<div class="pick-empty">模型目录为空（不影响保存，可改用下面的自定义规则）</div>';
+    renderKeyModelCustom();
+    return;
+  }
+  const q = ($('keyModelSearch').value || '').trim().toLowerCase();
+  const rows = keyModelCatalog.filter(m =>
+    !q || (m.id + ' ' + (m.name || '') + ' ' + (m.vendor || '')).toLowerCase().includes(q));
+  box.innerHTML = rows.length ? rows.map(m =>
+    '<label class="pick-item"><input type="checkbox" data-model="' + esc(m.id) + '"' +
+      (keyModelSelected.has(m.id) ? ' checked' : '') + '>' +
+      '<span class="nm">' + esc(modelBare(m.id)) + '</span>' +
+      '<span class="meta">' + esc(modelRealm(m.id)) + (m.credits ? ' · ' + esc(m.credits) : '') + '</span></label>'
+  ).join('') : '<div class="pick-empty">没有匹配的模型</div>';
+  renderKeyModelCustom();
+}
+
+function renderKeyModelCustom() {
+  const wrap = $('keyModelCustomWrap');
+  if (!wrap) return;
+  wrap.hidden = !keyModelCustom.length;
+  wrap.innerHTML = keyModelCustom.map((p, i) =>
+    '<span class="tag mute">' + esc(p) +
+    '<button type="button" data-i="' + i + '" title="移除">✕</button></span>').join('');
+}
+
+function addKeyModelRule() {
+  const inp = $('keyModelCustom');
+  if (!inp) return;
+  const raw = (inp.value || '').trim();
+  if (!raw) return;
+  const ids = new Set((keyModelCatalog || []).map(m => m.id));
+  raw.split(',').map(s => s.trim()).filter(Boolean).forEach(v => {
+    if (ids.has(v)) { keyModelSelected.add(v); return; }
+    if (!keyModelCustom.includes(v)) keyModelCustom.push(v);
+  });
+  inp.value = '';
+  renderKeyModelPick();
+}
+
+/* splitKeyModels 把配置里的白名单还原成「勾选 + 自定义规则」。
+   手写配置常见裸名（glm-5.2），能唯一匹配到某个域就自动勾上，避免编辑一次
+   就把它降级成自定义规则。 */
+function splitKeyModels(patterns) {
+  keyModelSelected = new Set();
+  keyModelCustom = [];
+  const ids = new Set((keyModelCatalog || []).map(m => m.id));
+  const bare = new Map();
+  (keyModelCatalog || []).forEach(m => {
+    const b = modelBare(m.id);
+    if (!bare.has(b)) bare.set(b, []);
+    bare.get(b).push(m.id);
+  });
+  (patterns || []).forEach(p => {
+    const t = String(p).trim();
+    if (!t) return;
+    if (ids.has(t)) { keyModelSelected.add(t); return; }
+    const hit = bare.get(t);
+    if (hit && hit.length === 1) { keyModelSelected.add(hit[0]); return; }
+    keyModelCustom.push(t);
+  });
 }
 
 function keyScopeText(k) {
@@ -3489,7 +3624,7 @@ function keyScopeText(k) {
 function renderKeys() {
   const tb = $('keysBody');
   if (!keyRows.length) {
-    tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">还没有密钥</div>在上面填个名字点「保存」，生成一个只属于某人的 key</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">还没有密钥</div>点右上角「新建」，生成一个只属于某人的 key</div></td></tr>';
     return;
   }
   tb.innerHTML = keyRows.map(k => {
@@ -3525,85 +3660,109 @@ function renderKeys() {
   }).join('');
 }
 
-function resetKeyEditor() {
-  keyEditId = null;
-  $('keyEditorTitle').textContent = '新建密钥';
-  $('btnKeyCancel').hidden = true;
-  $('keyId').disabled = false;
-  ['keyName', 'keyId', 'keyMinCredit', 'keyMaxRpm', 'keyDailyTokens', 'keyModels', 'keyNote'].forEach(id => { $(id).value = ''; });
-  [...$('keyAccounts').options].forEach(o => { o.selected = false; });
-  $('keyPin').value = '';
-  $('keyEnabled').checked = true;
-  $('keyContentLog').checked = false;
-}
-
-function openKeyEditor(k) {
-  keyEditId = k.id;
-  $('keyEditorTitle').textContent = '编辑密钥 · ' + (k.name || k.id);
-  $('btnKeyCancel').hidden = false;
-  $('keyName').value = k.name || '';
-  $('keyId').value = k.id;
-  $('keyId').disabled = true;
-  const allow = new Set(k.accounts || []);
-  [...$('keyAccounts').options].forEach(o => { o.selected = allow.has(o.value); });
-  $('keyPin').value = k.pin || '';
-  $('keyMinCredit').value = k.min_credit || '';
-  $('keyMaxRpm').value = k.max_rpm || '';
-  $('keyDailyTokens').value = k.daily_tokens || '';
-  $('keyModels').value = (k.models || []).join(', ');
-  $('keyNote').value = k.note || '';
-  $('keyEnabled').checked = !!k.enabled;
-  $('keyContentLog').checked = !!k.content_log;
-  $('keyNew').hidden = true;
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+/* openKeyEditor 打开弹窗并装载数据：k 为空 = 新建。
+   模型目录要等一次上游查询，所以先开弹窗再填充，避免点击后页面「卡住」。 */
+async function openKeyEditor(k) {
+  keyEditId = k ? k.id : null;
+  $('keyEditorTitle').textContent = k ? ('编辑密钥 · ' + (k.name || k.id)) : '新建密钥';
+  $('keyId').disabled = !!k;
+  $('keyName').value = k ? (k.name || '') : '';
+  $('keyId').value = k ? k.id : '';
+  renderKeyAccountPick(new Set(k ? (k.accounts || []) : []));
+  $('keyPin').value = k ? (k.pin || '') : '';
+  $('keyMinCredit').value = k && k.min_credit ? k.min_credit : '';
+  $('keyMaxRpm').value = k && k.max_rpm ? k.max_rpm : '';
+  $('keyDailyTokens').value = k && k.daily_tokens ? k.daily_tokens : '';
+  $('keyNote').value = k ? (k.note || '') : '';
+  $('keyEnabled').checked = k ? !!k.enabled : true;
+  $('keyContentLog').checked = k ? !!k.content_log : false;
+  $('keyModelSearch').value = '';
+  $('keyModelCustom').value = '';
+  openVeil('keyVeil');
+  $('keyName').focus();
+  await ensureKeyModelCatalog();
+  splitKeyModels(k ? (k.models || []) : []);
+  renderKeyModelPick();
 }
 
 function showNewKey(key) {
-  $('keyNew').hidden = false;
   $('keyNewValue').value = key || '';
-  $('keyNewValue').focus();
-  $('keyNewValue').select();
+  openVeil('keySecretVeil');
+  setTimeout(() => { $('keyNewValue').focus(); $('keyNewValue').select(); }, 30);
 }
 
 if ($('btnKeySave')) $('btnKeySave').onclick = async () => {
   const body = {
     name: $('keyName').value.trim(),
-    accounts: [...$('keyAccounts').selectedOptions].map(o => o.value),
+    accounts: pickedAccounts(),
     pin: $('keyPin').value,
     min_credit: keyNum($('keyMinCredit').value),
     max_rpm: keyNum($('keyMaxRpm').value),
     daily_tokens: keyNum($('keyDailyTokens').value),
-    models: $('keyModels').value.split(',').map(s => s.trim()).filter(Boolean),
+    models: [...keyModelSelected, ...keyModelCustom],
     note: $('keyNote').value.trim(),
     enabled: $('keyEnabled').checked,
     content_log: $('keyContentLog').checked,
   };
+  const btn = $('btnKeySave');
+  btn.disabled = true;
   try {
     if (keyEditId) {
       await api('keys/' + encodeURIComponent(keyEditId), { method: 'POST', body: JSON.stringify(body) });
       toast('已保存');
-      resetKeyEditor();
+      closeVeil('keyVeil');
     } else {
       const id = $('keyId').value.trim();
       if (id) body.id = id;
       const d = await api('keys', { method: 'POST', body: JSON.stringify(body) });
-      toast('密钥已创建，明文只显示这一次');
-      resetKeyEditor();
+      closeVeil('keyVeil');
       showNewKey(d.key);
+      toast('密钥已创建，明文只显示这一次');
     }
     loadKeys();
   } catch (e) { toast(e.message, 'bad'); }
+  finally { btn.disabled = false; }
 };
 
-if ($('btnKeyNew')) $('btnKeyNew').onclick = () => { resetKeyEditor(); $('keyNew').hidden = true; $('keyName').focus(); };
-if ($('btnKeyCancel')) $('btnKeyCancel').onclick = () => { resetKeyEditor(); $('keyNew').hidden = true; };
+if ($('btnKeyNew')) $('btnKeyNew').onclick = () => openKeyEditor(null);
 if ($('btnKeysRefresh')) $('btnKeysRefresh').onclick = () => loadKeys();
+if ($('btnKeyCancel')) $('btnKeyCancel').onclick = () => closeVeil('keyVeil');
+if ($('btnKeySecretDone')) $('btnKeySecretDone').onclick = () => closeVeil('keySecretVeil');
 if ($('btnKeyCopy')) $('btnKeyCopy').onclick = async () => {
   const v = $('keyNewValue').value;
   if (!v) return;
   try { await navigator.clipboard.writeText(v); toast('已复制'); }
   catch (e) { $('keyNewValue').select(); toast('复制失败，请手动复制', 'bad'); }
 };
+
+/* 模型勾选：状态存 JS（搜索/全选会重渲染 DOM，勾选不能丢）。 */
+if ($('keyModelPick')) $('keyModelPick').addEventListener('change', e => {
+  const cb = e.target.closest('input[data-model]');
+  if (!cb) return;
+  if (cb.checked) keyModelSelected.add(cb.dataset.model);
+  else keyModelSelected.delete(cb.dataset.model);
+});
+if ($('keyModelSearch')) $('keyModelSearch').addEventListener('input', () => renderKeyModelPick());
+if ($('btnKeyModelAll')) $('btnKeyModelAll').onclick = () => {
+  const q = ($('keyModelSearch').value || '').trim().toLowerCase();
+  (keyModelCatalog || []).forEach(m => {
+    if (!q || (m.id + ' ' + (m.name || '') + ' ' + (m.vendor || '')).toLowerCase().includes(q)) {
+      keyModelSelected.add(m.id);
+    }
+  });
+  renderKeyModelPick();
+};
+if ($('btnKeyModelNone')) $('btnKeyModelNone').onclick = () => { keyModelSelected.clear(); renderKeyModelPick(); };
+if ($('btnKeyModelAdd')) $('btnKeyModelAdd').onclick = addKeyModelRule;
+if ($('keyModelCustom')) $('keyModelCustom').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); addKeyModelRule(); }
+});
+if ($('keyModelCustomWrap')) $('keyModelCustomWrap').addEventListener('click', e => {
+  const b = e.target.closest('button[data-i]');
+  if (!b) return;
+  keyModelCustom.splice(Number(b.dataset.i), 1);
+  renderKeyModelCustom();
+});
 
 if ($('keysBody')) $('keysBody').addEventListener('click', async e => {
   const btn = e.target.closest('button[data-act]');

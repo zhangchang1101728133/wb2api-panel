@@ -17,6 +17,7 @@ data/
 config.json
 
 # Build artifacts
+/wb2api-linux-amd64
 *.tmp
 __pycache__/
 
