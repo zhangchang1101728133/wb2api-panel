@@ -38,7 +38,7 @@ import (
 // 用 var 而非 const，便于编译期注入：
 //
 //	go build -ldflags "-X main.appVersion=1.14.1-panel" ./cmd/server
-var appVersion = "1.14.8-panel"
+var appVersion = "1.14.9-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。

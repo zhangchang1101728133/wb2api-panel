@@ -1277,7 +1277,8 @@ function showCfgTab(name) {
   }
   if (!known.includes(name)) name = known[0] || 'service';
   tabs.querySelectorAll('button[data-cfg]').forEach(b => b.classList.toggle('on', b.dataset.cfg === name));
-  form.querySelectorAll('[data-cfg]').forEach(el => el.classList.toggle('cfghide', el.dataset.cfg !== name));
+  // 只切换内容块：页签按钮本身也带 data-cfg，选择器必须限定 .box
+  form.querySelectorAll('.box[data-cfg]').forEach(el => el.classList.toggle('cfghide', el.dataset.cfg !== name));
   try { localStorage.setItem(CFG_TAB_KEY, name); } catch (e) {}
 }
 if ($('cfgTabs')) $('cfgTabs').addEventListener('click', e => {
