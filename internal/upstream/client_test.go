@@ -306,7 +306,9 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		t.Errorf("200 response should carry nil body, got %q", respBody)
 	}
 	rc.Close()
-	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "WorkBuddy" {
+	// X-Product 取官方客户端的 deploymentType（SaaS），不是 productName；
+	// 发产品名会被判成非官方客户端（403 code=11140）。
+	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "SaaS" {
 		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {
