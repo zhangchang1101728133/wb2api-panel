@@ -46,3 +46,6 @@ docs/
 *.zip
 server.exe
 .DS_Store
+
+# 前端测试生成的拼接包（TestMain 临时产物）
+/internal/panel/app.test.js

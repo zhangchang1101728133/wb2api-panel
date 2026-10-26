@@ -27,7 +27,7 @@ func bndCreditNode(t *testing.T, script string) string {
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("credit history adversarial node test failed: %v\n%s", err, out)
 	}

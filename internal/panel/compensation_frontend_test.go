@@ -58,7 +58,7 @@ const rows = [
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("compensation gate node test failed: %v\n%s", err, out)
 	}
@@ -89,7 +89,7 @@ func TestAppJSCompGateMutationDiscriminates(t *testing.T) {
 	}
 	for name, m := range mutants {
 		t.Run(name, func(t *testing.T) {
-			orig, err := os.ReadFile("app.js")
+			orig, err := os.ReadFile(testJS)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -179,7 +179,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("compensation deadline node test failed: %v\n%s", err, out)
 	}
@@ -261,7 +261,7 @@ process.stdout.write(JSON.stringify(out));`
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("compensation render node test failed: %v\n%s", err, out)
 	}

@@ -66,6 +66,12 @@ type Recorder struct {
 	stop    chan struct{}
 	done    chan struct{}
 	enabled bool
+
+	// daysMu 保护「密钥 → 有归档的日期」索引。面板每次切视图都会问一次
+	// Days(key)，原实现要逐行扫当天文件；索引把它变成 O(1)，首次使用扫一遍建好。
+	daysMu   sync.RWMutex
+	daysIdx  map[string]map[string]struct{}
+	daysInit bool
 }
 
 // New 创建归档器；keepDays <=0 按 7 天。
@@ -239,8 +245,82 @@ func (r *Recorder) write(rec Record) {
 	}
 	if _, err := f.Write(append(raw, '\n')); err != nil {
 		log.Printf("WARN: [contentlog] 写入 %s 失败: %v", path, err)
+	} else {
+		r.indexKey(rec.Key, rec.Time.In(cst).Format("2006-01-02"))
 	}
 	_ = f.Close()
+}
+
+// indexKey 把「密钥有归档的日期」写进内存索引（未建索引时先建好，避免漏装）。
+func (r *Recorder) indexKey(key, date string) {
+	if key == "" || date == "" {
+		return
+	}
+	r.daysMu.Lock()
+	defer r.daysMu.Unlock()
+	if !r.daysInit {
+		// 索引还没建：先按磁盘建一遍，再把这条补进去。
+		r.buildDaysIndexLocked()
+	}
+	if r.daysIdx == nil {
+		r.daysIdx = make(map[string]map[string]struct{})
+	}
+	set := r.daysIdx[key]
+	if set == nil {
+		set = make(map[string]struct{})
+		r.daysIdx[key] = set
+	}
+	set[date] = struct{}{}
+}
+
+// buildDaysIndexLocked 扫描归档目录，建立 key → 日期集合（只解 key 字段）。
+// 调用方需持有 daysMu 写锁。
+func (r *Recorder) buildDaysIndexLocked() {
+	idx := make(map[string]map[string]struct{})
+	entries, err := os.ReadDir(r.dir)
+	if err == nil {
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".jsonl") {
+				continue
+			}
+			date := strings.TrimSuffix(name, ".jsonl")
+			if len(date) != len("2006-01-02") {
+				continue
+			}
+			f, err := os.Open(filepath.Join(r.dir, name))
+			if err != nil {
+				continue
+			}
+			sc := bufio.NewScanner(f)
+			sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+			for sc.Scan() {
+				var probe struct {
+					Key string `json:"key"`
+				}
+				if json.Unmarshal(sc.Bytes(), &probe) != nil || probe.Key == "" {
+					continue
+				}
+				set := idx[probe.Key]
+				if set == nil {
+					set = make(map[string]struct{})
+					idx[probe.Key] = set
+				}
+				set[date] = struct{}{}
+			}
+			_ = f.Close()
+		}
+	}
+	r.daysIdx = idx
+	r.daysInit = true
+}
+
+// invalidateDays 归档内容变了（删除/清空），索引作废，下次按需重建。
+func (r *Recorder) invalidateDays() {
+	r.daysMu.Lock()
+	r.daysIdx = nil
+	r.daysInit = false
+	r.daysMu.Unlock()
 }
 
 // Delete 删除归档记录，返回实际删除的条数。
@@ -262,6 +342,9 @@ func (r *Recorder) Delete(date, key, id string) (int, error) {
 		return 0, fmt.Errorf("invalid date %q", date)
 	}
 	path := filepath.Join(r.dir, date+".jsonl")
+
+	// 归档内容会变，日期索引作废（下次按需重建；失败也重建，代价很小）。
+	defer r.invalidateDays()
 
 	r.fileMu.Lock()
 	defer r.fileMu.Unlock()
@@ -326,6 +409,7 @@ func (r *Recorder) Purge() (int, error) {
 	if r == nil || r.dir == "" {
 		return 0, fmt.Errorf("content archive unavailable")
 	}
+	defer r.invalidateDays()
 	r.fileMu.Lock()
 	defer r.fileMu.Unlock()
 	entries, err := os.ReadDir(r.dir)
@@ -477,6 +561,21 @@ func (r *Recorder) Days(key string) []string {
 	if r == nil || r.dir == "" {
 		return nil
 	}
+	if key != "" {
+		// 走索引：面板每次切视图都会问一次，逐行扫大文件太浪费。
+		r.daysMu.Lock()
+		if !r.daysInit {
+			r.buildDaysIndexLocked()
+		}
+		set := r.daysIdx[key]
+		dates := make([]string, 0, len(set))
+		for d := range set {
+			dates = append(dates, d)
+		}
+		r.daysMu.Unlock()
+		sort.Sort(sort.Reverse(sort.StringSlice(dates)))
+		return dates
+	}
 	entries, err := os.ReadDir(r.dir)
 	if err != nil {
 		return nil
@@ -580,7 +679,7 @@ func (r *Recorder) Query(key, date string, limit int) ([]Record, error) {
 // 一次取 100 条时把所有正文字符串都解出来会瞬间吃掉几百 MB 内存——而列表只
 // 需要摘要。用一个不含大字段的中间结构解码，大字符串根本不会被分配。
 // 正文预览仍保留（Text 截到 previewRunes 字），点开详情再用 Get 取全文。
-func (r *Recorder) QueryMeta(key, date string, limit, previewRunes int) ([]Record, error) {
+func (r *Recorder) QueryMeta(key, date string, limit, previewRunes int, before time.Time) ([]Record, error) {
 	if r == nil || r.dir == "" {
 		return nil, fmt.Errorf("content archive unavailable")
 	}
@@ -637,6 +736,10 @@ func (r *Recorder) QueryMeta(key, date string, limit, previewRunes int) ([]Recor
 			continue
 		}
 		if key != "" && m.Key != key {
+			continue
+		}
+		// before：翻页游标，只要比它更早的记录（同一时刻的用 id 兜底去重由调用方负责）。
+		if !before.IsZero() && !m.Time.Before(before) {
 			continue
 		}
 		out = append(out, Record{

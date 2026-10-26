@@ -101,6 +101,8 @@ type Filter struct {
 	UserAgent string
 	From      time.Time
 	To        time.Time
+	// Before 翻页游标：只保留严格早于该时刻的事件（配合「加载更多」）。
+	Before time.Time
 }
 
 // ArchiveStats 归档存储状态。
@@ -597,6 +599,9 @@ func (f Filter) match(e Event) bool {
 		return false
 	}
 	if !f.To.IsZero() && e.Time.After(f.To) {
+		return false
+	}
+	if !f.Before.IsZero() && !e.Time.Before(f.Before) {
 		return false
 	}
 	return true

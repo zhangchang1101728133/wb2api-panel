@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 // contentDelete 删除归档记录：
@@ -109,9 +110,19 @@ func (p *Panel) contentList(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
+	// before 是翻页游标（RFC3339）：只返回比它更早的记录，配合前端「加载更多」。
+	var before time.Time
+	if v := q.Get("before"); v != "" {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid before: "+err.Error())
+			return
+		}
+		before = t
+	}
 	// 列表只要摘要：QueryMeta 在解析阶段就丢掉请求体/原始响应，避免把上百 MB
 	// 正文解进内存（详情展开时再按 id 单条取全文）。
-	recs, err := rec.QueryMeta(q.Get("key"), q.Get("date"), limit, 600)
+	recs, err := rec.QueryMeta(q.Get("key"), q.Get("date"), limit, 600, before)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -120,6 +131,7 @@ func (p *Panel) contentList(w http.ResponseWriter, r *http.Request) {
 		"ok":      true,
 		"enabled": rec.Enabled(),
 		"records": recs,
+		"has_more": len(recs) >= limit && limit > 0,
 	})
 }
 

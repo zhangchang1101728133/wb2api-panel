@@ -18,6 +18,23 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
+// 前端逻辑按视图域拆成多个同源脚本（浏览器按 index.html 里的顺序加载）：
+// core.js 是公共设施（请求/主题/路由），其余每个文件是一个视图域。
+//go:embed core.js
+var coreJS []byte
+
+//go:embed views-accounts.js
+var viewsAccountsJS []byte
+
+//go:embed views-config.js
+var viewsConfigJS []byte
+
+//go:embed views-tasks.js
+var viewsTasksJS []byte
+
+//go:embed views-usage.js
+var viewsUsageJS []byte
+
 //go:embed app.js
 var appJS []byte
 
@@ -62,11 +79,22 @@ func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
+	writeJS(w, appJS)
+}
+
+// writeJS 统一的同源脚本文本响应（CSP script-src 'self' 依赖同源）。
+func writeJS(w http.ResponseWriter, body []byte) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(appJS)
+	_, _ = w.Write(body)
 }
+
+func (p *Panel) coreScript(w http.ResponseWriter, r *http.Request)      { writeJS(w, coreJS) }
+func (p *Panel) viewsAccountsScript(w http.ResponseWriter, r *http.Request) { writeJS(w, viewsAccountsJS) }
+func (p *Panel) viewsConfigScript(w http.ResponseWriter, r *http.Request)   { writeJS(w, viewsConfigJS) }
+func (p *Panel) viewsTasksScript(w http.ResponseWriter, r *http.Request)    { writeJS(w, viewsTasksJS) }
+func (p *Panel) viewsUsageScript(w http.ResponseWriter, r *http.Request)    { writeJS(w, viewsUsageJS) }
 
 // mobileStyle 输出手机端适配样式（同源样式表，CSP style-src 'self' 加载）。
 // 单独成文而非写进 index.html：上游频繁改 index.html，独立文件可避免同步上游时反复冲突。
@@ -78,9 +106,4 @@ func (p *Panel) mobileStyle(w http.ResponseWriter, r *http.Request) {
 }
 
 // mobileScript 输出手机端联动逻辑（同源脚本，须在 app.js 之后加载）。
-func (p *Panel) mobileScript(w http.ResponseWriter, r *http.Request) {
-	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(mobileJS)
-}
+func (p *Panel) mobileScript(w http.ResponseWriter, r *http.Request) { writeJS(w, mobileJS) }

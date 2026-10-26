@@ -178,6 +178,12 @@ func (p *Panel) Logs() *Ring { return p.logs }
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
+	// 前端按视图域拆分的同源脚本（index.html 里按顺序加载）。
+	p.mux.HandleFunc("GET /panel/core.js", p.coreScript)
+	p.mux.HandleFunc("GET /panel/views-accounts.js", p.viewsAccountsScript)
+	p.mux.HandleFunc("GET /panel/views-config.js", p.viewsConfigScript)
+	p.mux.HandleFunc("GET /panel/views-tasks.js", p.viewsTasksScript)
+	p.mux.HandleFunc("GET /panel/views-usage.js", p.viewsUsageScript)
 	p.mux.HandleFunc("GET /panel/mobile.css", p.mobileStyle)
 	p.mux.HandleFunc("GET /panel/mobile.js", p.mobileScript)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
@@ -402,6 +408,7 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 		UserAgent: q.Get("user_agent"),
 		From:      parseTimeParam(q.Get("from")),
 		To:        parseTimeParam(q.Get("to")),
+		Before:    parseTimeParam(q.Get("before")), // 翻页游标：只取比它更早的
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -412,7 +419,11 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []reqlog.Event{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"entries": rows, "limit": limit})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries":  rows,
+		"limit":    limit,
+		"has_more": len(rows) >= limit,
+	})
 }
 
 // creditHistory 返回积分变动流水（新的在前），供「运行日志 → 积分历史」展示。

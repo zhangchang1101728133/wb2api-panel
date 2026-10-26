@@ -24,7 +24,7 @@ func TestAppJSSyntax(t *testing.T) {
 	if err != nil {
 		t.Skip("node not available; skipping JS syntax check")
 	}
-	for _, name := range []string{"app.js", "mobile.js"} {
+	for _, name := range append(append([]string{}, panelScripts...), "mobile.js") {
 		path, err := filepath.Abs(name)
 		if err != nil {
 			t.Fatal(err)
@@ -119,7 +119,7 @@ try {
 	}
 	hf.Close()
 	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
-		cmd := exec.Command(node, hf.Name(), "app.js")
+		cmd := exec.Command(node, hf.Name(), testJS)
 		cmd.Dir = "." // 测试工作目录 = internal/panel
 		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
 		out, err := cmd.CombinedOutput()
@@ -169,7 +169,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("credit formatting node test failed: %v\n%s", err, out)
 	}
@@ -213,7 +213,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("rate-limit formatting node test failed: %v\n%s", err, out)
 	}
@@ -264,7 +264,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("request log formatting node test failed: %v\n%s", err, out)
 	}
@@ -311,7 +311,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("credit history formatting node test failed: %v\n%s", err, out)
 	}
@@ -361,7 +361,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("request filter node test failed: %v\n%s", err, out)
 	}
@@ -424,7 +424,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("model filter node test failed: %v\n%s", err, out)
 	}
@@ -493,7 +493,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("model availability node test failed: %v\n%s", err, out)
 	}
@@ -554,7 +554,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("usage chart node test failed: %v\n%s", err, out)
 	}
@@ -628,7 +628,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("time range node test failed: %v\n%s", err, out)
 	}
@@ -657,7 +657,7 @@ process.stdout.write(JSON.stringify({
 // 少了一个开关而 Go 测试全绿，只有人肉点开配置页才会发现。这里把"表单字段 ↔
 // CFG_MAP"与"关键热改键必须在表单里"两条都钉住。
 func TestConfigFormMatchesCFGMap(t *testing.T) {
-	src, err := os.ReadFile("app.js")
+	src, err := os.ReadFile(testJS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -755,7 +755,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("detail groups node test failed: %v\n%s", err, out)
 	}
@@ -807,7 +807,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry summary node test failed: %v\n%s", err, out)
 	}
@@ -867,7 +867,7 @@ process.stdout.write(JSON.stringify([
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("collectConfig node test failed: %v\n%s", err, out)
 	}
@@ -931,7 +931,7 @@ process.stdout.write(JSON.stringify(names));`
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry sort node test failed: %v\n%s", err, out)
 	}
@@ -1008,7 +1008,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry snapshot node test failed: %v\n%s", err, out)
 	}
@@ -1100,7 +1100,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry parity node test failed: %v\n%s", err, out)
 	}
@@ -1160,7 +1160,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry note node test failed: %v\n%s", err, out)
 	}
@@ -1252,7 +1252,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("chart tooltip node test failed: %v\n%s", err, out)
 	}
@@ -1305,7 +1305,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("remark name node test failed: %v\n%s", err, out)
 	}
@@ -1363,7 +1363,7 @@ process.stdout.write(JSON.stringify({fresh: fresh, folded: folded, unfolded: unf
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), testJS).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry fold node test failed: %v\n%s", err, out)
 	}
@@ -1391,7 +1391,7 @@ func TestPanelRemarkAndFoldWiring(t *testing.T) {
 			t.Fatalf("index.html 的过期列表容器默认带 hidden：%s", strings.TrimSpace(line))
 		}
 	}
-	js, err := os.ReadFile("app.js")
+	js, err := os.ReadFile(testJS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1447,7 +1447,7 @@ func TestRegionSchedulingFormRoundTrip(t *testing.T) {
 	if err = os.WriteFile(fp, []byte(script), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command(node, fp, "app.js").CombinedOutput(); err != nil {
+	if out, err := exec.Command(node, fp, testJS).CombinedOutput(); err != nil {
 		t.Fatalf("form round trip: %v\n%s", err, out)
 	}
 }
