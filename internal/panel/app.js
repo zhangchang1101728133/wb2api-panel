@@ -358,7 +358,7 @@ function go(v) {
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
-  if (v === 'config') { loadConfig(); loadVersions(); }
+  if (v === 'config') { loadConfig(); loadVersions(); showCfgTab(); }
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'keys') loadKeys();
@@ -1265,6 +1265,26 @@ $('btnEye').onclick = () => {
 };
 if ($('btnCfgReload')) $('btnCfgReload').onclick = loadConfig;
 
+/* 配置分页：5 组字段一次只显示一组，避免一屏几百个输入框。
+   当前页记在 localStorage，下次进来还停在同一页。 */
+const CFG_TAB_KEY = 'wb2api.cfgtab';
+function showCfgTab(name) {
+  const tabs = $('cfgTabs'), form = $('cfgForm');
+  if (!tabs || !form) return;
+  const known = [...tabs.querySelectorAll('button[data-cfg]')].map(b => b.dataset.cfg);
+  if (!known.includes(name)) {
+    try { name = localStorage.getItem(CFG_TAB_KEY) || ''; } catch (e) { name = ''; }
+  }
+  if (!known.includes(name)) name = known[0] || 'service';
+  tabs.querySelectorAll('button[data-cfg]').forEach(b => b.classList.toggle('on', b.dataset.cfg === name));
+  form.querySelectorAll('[data-cfg]').forEach(el => el.classList.toggle('cfghide', el.dataset.cfg !== name));
+  try { localStorage.setItem(CFG_TAB_KEY, name); } catch (e) {}
+}
+if ($('cfgTabs')) $('cfgTabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-cfg]');
+  if (b) showCfgTab(b.dataset.cfg);
+});
+
 /* ── 客户端版本 ─────────────────────────────────────────────────────
    当前生效值来自上游客户端的实时字段（配置改了立刻变），巡检状态来自最近一次
    「拉版本源 → 比对 → 写回」。立即检查会同步跑一次，成功后配置已落盘并热生效。 */
@@ -1276,14 +1296,14 @@ async function loadVersions() {
     const e = d.effective || {};
     if (now) {
       const cn = e.cn || {}, gl = e.global || {};
-      now.textContent = '生效中：国内 ' + (cn.client || '?') + ' / CLI ' + (cn.cli || '?') +
-        ' · 国际 ' + (gl.client || '?') + ' / CLI ' + (gl.cli || '?');
+      now.textContent = '国内 ' + (cn.client || '?') + ' / CLI ' + (cn.cli || '?') +
+        '　·　国际 ' + (gl.client || '?') + ' / CLI ' + (gl.cli || '?');
     }
     if (st) {
       const w = d.watch || {};
       st.textContent = w.last_check
         ? '上次检查 ' + new Date(w.last_check).toLocaleString() +
-          (w.last_error ? ' · 失败：' + w.last_error : (w.last_note ? ' · ' + w.last_note : ''))
+          (w.last_error ? '　失败：' + w.last_error : (w.last_note ? '　' + w.last_note : ''))
         : '还没检查过';
     }
   } catch (err) {

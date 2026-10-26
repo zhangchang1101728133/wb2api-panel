@@ -109,18 +109,12 @@ func (p *Panel) contentList(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	recs, err := rec.Query(q.Get("key"), q.Get("date"), limit)
+	// 列表只要摘要：QueryMeta 在解析阶段就丢掉请求体/原始响应，避免把上百 MB
+	// 正文解进内存（详情展开时再按 id 单条取全文）。
+	recs, err := rec.QueryMeta(q.Get("key"), q.Get("date"), limit, 600)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	// 列表只回「够生成摘要 + 够判读」的部分：正文留 600 字预览，请求/响应原样
-	// 不下发。归档里一条请求体可能十几 MB（带工具定义的 agent 流量），90 条一起
-	// 塞进 DOM 会让面板直接卡死；完整内容展开时再按 id 单条取。
-	for i := range recs {
-		recs[i].Request = nil
-		recs[i].Response = ""
-		recs[i].Text = clipText(recs[i].Text, 600)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
@@ -154,14 +148,3 @@ func (p *Panel) contentItem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "record": item})
 }
 
-// clipText 截断预览文本（按 rune 截，避免切坏 UTF-8）。
-func clipText(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
-}

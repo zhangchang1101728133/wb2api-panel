@@ -574,5 +574,97 @@ func (r *Recorder) Query(key, date string, limit int) ([]Record, error) {
 	return out, nil
 }
 
+// QueryMeta 与 Query 相同的筛选/排序，但**解析时跳过请求体与原始响应**。
+//
+// 为什么单独一个方法：归档单条可能十几 MB（agent 流量带全量工具定义），列表
+// 一次取 100 条时把所有正文字符串都解出来会瞬间吃掉几百 MB 内存——而列表只
+// 需要摘要。用一个不含大字段的中间结构解码，大字符串根本不会被分配。
+// 正文预览仍保留（Text 截到 previewRunes 字），点开详情再用 Get 取全文。
+func (r *Recorder) QueryMeta(key, date string, limit, previewRunes int) ([]Record, error) {
+	if r == nil || r.dir == "" {
+		return nil, fmt.Errorf("content archive unavailable")
+	}
+	if date == "" {
+		date = time.Now().In(cst).Format("2006-01-02")
+	}
+	if _, err := time.ParseInLocation("2006-01-02", date, cst); err != nil {
+		return nil, fmt.Errorf("invalid date %q", date)
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if previewRunes <= 0 {
+		previewRunes = 600
+	}
+	path := filepath.Join(r.dir, date+".jsonl")
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []Record{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	// 只声明摘要字段：json 会忽略响应体/请求体，不会为它们分配内存。
+	type metaRecord struct {
+		ID        string    `json:"id"`
+		Time      time.Time `json:"time"`
+		Key       string    `json:"key"`
+		Model     string    `json:"model"`
+		Account   string    `json:"account"`
+		Status    int       `json:"status"`
+		Stream    bool      `json:"stream"`
+		Prompt    int64     `json:"prompt_tokens"`
+		Complete  int64     `json:"completion_tokens"`
+		Text      string    `json:"text"`
+		Truncated bool      `json:"truncated"`
+	}
+
+	var out []Record
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 256<<10), 8<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var m metaRecord
+		if json.Unmarshal(line, &m) != nil {
+			continue
+		}
+		if key != "" && m.Key != key {
+			continue
+		}
+		out = append(out, Record{
+			ID: m.ID, Time: m.Time, Key: m.Key, Model: m.Model, Account: m.Account,
+			Status: m.Status, Stream: m.Stream, Prompt: m.Prompt, Complete: m.Complete,
+			Text: clipRunes(m.Text, previewRunes), Truncated: m.Truncated,
+		})
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out, nil
+}
+
+// clipRunes 按字符截断（不切坏 UTF-8）。
+func clipRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 // cst UTC+8 固定时区（与用量/签到日界同口径，不依赖宿主 tzdata）。
 var cst = time.FixedZone("UTC+8", 8*3600)

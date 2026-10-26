@@ -327,6 +327,38 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .savebar .grow { flex: 1; }
 .restart-note { color: var(--warn); font-size: 12.5px; }
 
+/* ── 配置分页 / 折叠块 ─────────────────────────────────────────────── */
+.cfgtabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 14px; }
+.cfgtabs button {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+  padding: 6px 14px; border-radius: 999px; font-size: 13px; cursor: pointer;
+}
+.cfgtabs button:hover:not(:disabled) { color: var(--ink); }
+.cfgtabs button.on {
+  background: var(--accent); border-color: var(--accent);
+  color: var(--accent-ink); font-weight: 550;
+}
+.cfghide { display: none !important; }
+.cfgver {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 14px; border: 1px solid var(--line-soft);
+  border-radius: 10px; background: var(--surface-2);
+}
+.cfgver .note { font-size: 13px; color: var(--ink); margin-top: 3px; }
+.cfgver .hint { margin-top: 3px; }
+details.fold {
+  border: 1px solid var(--line-soft); border-radius: 10px;
+  padding: 0 14px; margin-top: 10px;
+}
+details.fold > summary {
+  cursor: pointer; padding: 10px 0; font-size: 13px; color: var(--ink-2);
+  list-style: none;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '▸ '; color: var(--ink-3); }
+details.fold[open] > summary::before { content: '▾ '; }
+details.fold[open] { padding-bottom: 14px; }
+
 /* ── 弹层 ─────────────────────────────────────────────────────────── */
 .veil { position: fixed; inset: 0; background: rgba(6,8,13,.62); backdrop-filter: blur(2px); display: none; z-index: 60; }
 .veil.on { display: flex; align-items: center; justify-content: center; padding: 20px; }
@@ -1035,7 +1067,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <!-- 配置 -->
     <section class="view" id="view-config" hidden>
       <form id="cfgForm">
-        <div class="box">
+        <!-- 配置分页：5 组，避免一屏几百个字段 -->
+        <nav class="cfgtabs" id="cfgTabs">
+          <button type="button" class="on" data-cfg="service">服务</button>
+          <button type="button" data-cfg="schedule">定时任务</button>
+          <button type="button" data-cfg="pool">账号池与调度</button>
+          <button type="button" data-cfg="upstream">上游与版本</button>
+          <button type="button" data-cfg="logging">日志与归档</button>
+        </nav>
+
+        <div class="box" data-cfg="service">
           <header><h3>服务</h3><span class="grow"></span><span class="note" id="cfgPath"></span></header>
           <div class="pad">
             <div class="grid2">
@@ -1053,7 +1094,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </div>
         </div>
 
-        <div class="box">
+        <div class="box" data-cfg="schedule">
           <header><h3>定时任务</h3></header>
           <div class="pad">
             <div class="grid2">
@@ -1117,7 +1158,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </div>
         </div>
 
-        <div class="box">
+        <div class="box" data-cfg="pool">
           <header><h3>账号池与流量治理</h3></header>
           <div class="pad">
             <div class="grid3">
@@ -1195,8 +1236,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </div>
         </div>
 
-        <div class="box">
-          <header><h3>上游与高级</h3></header>
+        <div class="box" data-cfg="upstream">
+          <header><h3>上游与版本</h3></header>
           <div class="pad">
             <div class="grid3">
               <label class="fld"><span class="lb">短请求超时</span>
@@ -1216,55 +1257,56 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">影响官网积分记录「使用端」显示。留空 = 按下方版本号自动拼装</span></label>
             </div>
 
-            <!-- 客户端版本：上游按 UA 校验客户端身份，版本过老会 11140 / 请求非法。
-                 保存即热生效（不需要重启、不需要重新编译）。 -->
+            <!-- 客户端版本：平时不用管，自动跟着官方 Changelog 走；需要时展开手动覆盖。 -->
             <div class="hr"></div>
-            <div class="lb" style="margin-bottom:6px">客户端版本 <span class="hint" id="verNow"></span></div>
-            <div class="grid2">
-              <label class="fld"><span class="lb">国内版 客户端</span>
-                <input name="upstream_client_version" placeholder="留空 = 内置默认">
-                <span class="hint">UA 的 WorkBuddy/&lt;版本&gt; 与 X-IDE-Version</span></label>
-              <label class="fld"><span class="lb">国内版 CLI</span>
-                <input name="upstream_cli_version" placeholder="留空 = 内置默认">
-                <span class="hint">UA 的 CLI/&lt;版本&gt; 段</span></label>
+            <div class="cfgver">
+              <div class="grow">
+                <div class="lb">客户端版本</div>
+                <div class="note" id="verNow">读取中…</div>
+                <div class="hint" id="vwStatus">—</div>
+              </div>
+              <button type="button" class="xs" id="btnVerCheck">检查更新</button>
             </div>
-            <div class="grid2">
-              <label class="fld"><span class="lb">国际版 客户端</span>
-                <input name="upstream_intl_client_version" placeholder="留空 = 内置默认">
-                <span class="hint">workbuddy-ai 平台段，与国内版不通用</span></label>
-              <label class="fld"><span class="lb">国际版 CLI</span>
-                <input name="upstream_intl_cli_version" placeholder="留空 = 内置默认">
-                <span class="hint">国际端点同样校验 CLI 段</span></label>
-            </div>
-
-            <div class="hr"></div>
-            <div class="lb" style="margin-bottom:6px">自动检查更新
-              <span class="hint" id="vwStatus">—</span>
-              <button type="button" class="xs" id="btnVerCheck" style="margin-left:8px">立即检查</button>
-            </div>
-            <div class="grid2">
-              <div class="switch"><span class="lb">启用定时巡检</span>
-                <input type="checkbox" name="vw_enabled"></div>
-              <label class="fld"><span class="lb">巡检周期</span>
-                <input name="vw_interval" placeholder="6h">
-                <span class="hint">Go 时长，如 6h / 30m；最小 1m</span></label>
-            </div>
-            <div class="grid2">
-              <label class="fld"><span class="lb">国内版版本源</span>
-                <input name="vw_cn_url" placeholder="留空 = 官方 Changelog（www.workbuddy.cn/docs/workbuddy/Changelog）">
-                <span class="hint">留空即用官方更新日志页；也可填任意 URL / 本地文件路径</span></label>
-              <label class="fld"><span class="lb">国内版正则（可选）</span>
-                <input name="vw_cn_regex" placeholder="([0-9]+\.[0-9]+\.[0-9]+)">
-                <span class="hint">留空 = 取页面里最大的版本号</span></label>
-            </div>
-            <div class="grid2">
-              <label class="fld"><span class="lb">国际版版本源</span>
-                <input name="vw_global_url" placeholder="留空 = 官方 Changelog（www.workbuddy.ai/docs/zh/workbuddy/Changelog）">
-                <span class="hint">同上</span></label>
-              <label class="fld"><span class="lb">国际版正则（可选）</span>
-                <input name="vw_global_regex" placeholder="([0-9]+\.[0-9]+\.[0-9]+)">
-                <span class="hint">留空 = 取页面里最大的版本号</span></label>
-            </div>
+            <details class="fold">
+              <summary>手动覆盖版本号</summary>
+              <div class="grid2">
+                <label class="fld"><span class="lb">国内版 客户端</span>
+                  <input name="upstream_client_version" placeholder="留空 = 内置默认"></label>
+                <label class="fld"><span class="lb">国内版 CLI</span>
+                  <input name="upstream_cli_version" placeholder="留空 = 内置默认"></label>
+              </div>
+              <div class="grid2">
+                <label class="fld"><span class="lb">国际版 客户端</span>
+                  <input name="upstream_intl_client_version" placeholder="留空 = 内置默认"></label>
+                <label class="fld"><span class="lb">国际版 CLI</span>
+                  <input name="upstream_intl_cli_version" placeholder="留空 = 内置默认"></label>
+              </div>
+              <span class="hint">保存即生效，不用重启；留空 = 内置默认。国际版与国内版不通用。</span>
+            </details>
+            <details class="fold">
+              <summary>自动检查设置</summary>
+              <div class="grid2">
+                <div class="switch"><span class="lb">启用定时巡检</span>
+                  <input type="checkbox" name="vw_enabled"></div>
+                <label class="fld"><span class="lb">巡检周期</span>
+                  <input name="vw_interval" placeholder="6h">
+                  <span class="hint">Go 时长，如 6h / 30m</span></label>
+              </div>
+              <div class="grid2">
+                <label class="fld"><span class="lb">国内版版本源</span>
+                  <input name="vw_cn_url" placeholder="留空 = 官方 Changelog">
+                  <span class="hint">留空即官方更新日志页；也可填任意 URL / 本地文件</span></label>
+                <label class="fld"><span class="lb">国际版版本源</span>
+                  <input name="vw_global_url" placeholder="留空 = 官方 Changelog"></label>
+              </div>
+              <div class="grid2">
+                <label class="fld"><span class="lb">国内版正则（可选）</span>
+                  <input name="vw_cn_regex" placeholder="([0-9]+\.[0-9]+\.[0-9]+)"></label>
+                <label class="fld"><span class="lb">国际版正则（可选）</span>
+                  <input name="vw_global_regex" placeholder="([0-9]+\.[0-9]+\.[0-9]+)"></label>
+              </div>
+              <span class="hint">正则留空 = 取页面里最大的版本号；CLI 版本没有公开来源，仍按手工维护。</span>
+            </details>
             <div class="hr"></div>
             <div class="grid2">
               <label class="fld"><span class="lb">系统提示词模式</span>
@@ -1287,8 +1329,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </div>
         </div>
 
-        <div class="box">
-          <header><h3>日志</h3></header>
+        <div class="box" data-cfg="logging">
+          <header><h3>日志与归档</h3></header>
           <div class="pad">
             <div class="switch"><span class="lb">记录调用来源（客户端 IP / User-Agent）</span>
               <input type="checkbox" name="request_client_info"></div>
