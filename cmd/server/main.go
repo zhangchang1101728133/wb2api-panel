@@ -540,10 +540,15 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
 	tmp := path + ".tmp"
+	// 容器把 config.json 单文件挂载进只读根文件系统时，同目录建临时文件会 EROFS
+	//（挂载文件本身可写，/app 不可写）。此时退回就地写：放弃原子性换可用性——
+	// 配置很小，写半截的概率远低于「面板保存直接失败」。
 	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return nil, fmt.Errorf("write config: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
+		if werr := writeConfigInPlace(path, out); werr != nil {
+			return nil, fmt.Errorf("write config: %w（临时文件：%v）", werr, err)
+		}
+		log.Printf("WARN: 配置原子替换不可用（%v），已就地写入 %s", err, path)
+	} else if err := os.Rename(tmp, path); err != nil {
 		// A single-file Docker bind mount cannot be renamed over its mount
 		// target (Linux returns EBUSY / "device or resource busy"). Keep the
 		// atomic path for regular files, but update the mounted file in place
@@ -551,25 +556,13 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		if !errors.Is(err, syscall.EBUSY) {
 			return nil, fmt.Errorf("replace config: %w", err)
 		}
-		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-		if openErr != nil {
-			_ = os.Remove(tmp)
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", openErr)
-		}
-		_, writeErr := f.Write(out)
-		if writeErr == nil {
-			writeErr = f.Sync()
-		}
-		closeErr := f.Close()
+		openErr := writeConfigInPlace(path, out)
 		// 写失败时保留 tmp（挂载文件已被 O_TRUNC 破坏，tmp 里是完整新内容，
 		// 可手工恢复）；写成功才清理。
-		if writeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
+		if openErr != nil {
+			return nil, fmt.Errorf("replace config（完整新内容保留在 %s）: %w", tmp, openErr)
 		}
 		_ = os.Remove(tmp)
-		if closeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
-		}
 	}
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
@@ -608,6 +601,24 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
 	return restartRequiredFields(newCfg), nil
+}
+
+// writeConfigInPlace 就地覆盖配置文件（O_TRUNC），供无法原子替换的部署形态使用
+// （只读根文件系统 + 单文件 bind mount）。调用方负责在失败时保留可恢复副本。
+func writeConfigInPlace(path string, out []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.Write(out)
+	if writeErr == nil {
+		writeErr = f.Sync()
+	}
+	closeErr := f.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
 }
 
 // applyCNChatBase 把 config cn.chat_base 装配进上游 client；空则保留内置默认，
