@@ -38,7 +38,7 @@ import (
 // 用 var 而非 const，便于编译期注入：
 //
 //	go build -ldflags "-X main.appVersion=1.14.1-panel" ./cmd/server
-var appVersion = "1.14.5-panel"
+var appVersion = "1.14.6-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -164,6 +164,8 @@ func main() {
 	up.UserAgent = cfg.Upstream.UserAgent
 	up.ClientVersion = cfg.Upstream.ClientVersion
 	up.CliVersion = cfg.Upstream.CliVersion
+	up.IntlClientVersion = cfg.Upstream.IntlClientVersion
+	up.IntlCLIVersion = cfg.Upstream.IntlCliVersion
 	up.ClientName = cfg.Upstream.ClientName
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
@@ -321,12 +323,35 @@ func main() {
 	up.SetCreditObserver(creditHist.Observe)
 	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
 
+	// 版本巡检状态（面板「配置 → 客户端版本」展示最近一次结果）。
+	vwStatus := &versionWatchStatus{}
+
+	// applyAndSave 是「校验 → 落盘 → 热生效」的唯一入口：面板保存、密钥保存、
+	// 版本巡检写回都走这里，避免出现两套热生效逻辑。
+	applyAndSave := func(raw []byte) ([]string, error) {
+		restart, err := saveConfig(raw, *cfgPath, live, p, up, sch)
+		if err != nil {
+			return restart, err
+		}
+		// 对话正文归档热生效：面板里勾上就立刻开始写，取消勾选就停写
+		// （历史文件仍可查）。归档目录是装配期捕获的，改目录只能重启。
+		if c, e := Load(*cfgPath); e == nil {
+			contentLog.SetEnabled(c.Logging.ContentArchive.Enabled)
+			contentLog.SetKeepDays(c.Logging.ContentArchive.KeepDays)
+			if d := c.Logging.ContentArchive.Dir; d != "" && d != contentLog.Dir() {
+				restart = append(restart, "logging.content_archive.dir")
+			}
+		}
+		return restart, nil
+	}
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
 		KeyUsage:    keyRec,
 		ContentLog:  contentLog,
-		RequestLog:  requestLog,		Upstream:    up,
+		RequestLog:  requestLog,
+		Upstream:    up,
 		Scheduler:   sch,
 		AuthDir:     cfg.AuthDir,
 		APIKey:      cfg.APIKey,
@@ -342,21 +367,19 @@ func main() {
 		LoadConfig: func() (any, error) {
 			return Load(*cfgPath)
 		},
-		SaveConfig: func(raw []byte) ([]string, error) {
-			restart, err := saveConfig(raw, *cfgPath, live, p, up, sch)
-			if err != nil {
-				return restart, err
+		SaveConfig: applyAndSave,
+		// 版本巡检：面板「立即检查」与后台定时共用同一条「拉源 → 解析 → 写回」链路。
+		UpstreamVersions: func() any {
+			cn, cli, ic, il := up.Versions()
+			return map[string]any{
+				"cn":     map[string]any{"client": cn, "cli": cli},
+				"global": map[string]any{"client": ic, "cli": il},
 			}
-			// 对话正文归档热生效：面板里勾上就立刻开始写，取消勾选就停写
-			// （历史文件仍可查）。归档目录是装配期捕获的，改目录只能重启。
-			if c, e := Load(*cfgPath); e == nil {
-				contentLog.SetEnabled(c.Logging.ContentArchive.Enabled)
-				contentLog.SetKeepDays(c.Logging.ContentArchive.KeepDays)
-				if d := c.Logging.ContentArchive.Dir; d != "" && d != contentLog.Dir() {
-					restart = append(restart, "logging.content_archive.dir")
-				}
-			}
-			return restart, nil
+		},
+		VersionStatus: func() any { return vwStatus.snapshot() },
+		VersionCheck: func() (any, error) {
+			changed, err := runVersionWatch(context.Background(), cfg.Upstream.VersionWatch, up, applyAndSave, vwStatus)
+			return vwStatus.snapshotWith(changed), err
 		},
 		// 多密钥读写：与配置页共用同一条校验+落盘+热生效链路。
 		LoadKeys: func() ([]apikey.Key, error) {
@@ -427,6 +450,15 @@ func main() {
 	// 模型归零；倍率表当时尚未建立）。
 	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
 	go warmModelRates(ctx, up, p)
+
+	// 客户端版本巡检（自动更新版本号）：配置每轮从磁盘重读，改了源/周期立即按新的来。
+	startVersionWatch(ctx, func() (VersionWatch, time.Duration) {
+		c, err := Load(*cfgPath)
+		if err != nil {
+			return VersionWatch{}, 0
+		}
+		return c.Upstream.VersionWatch, c.VersionWatchInterval
+	}, up, applyAndSave, vwStatus)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -586,6 +618,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		ContentArchive:       newCfg.Logging.ContentArchive.Enabled,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	// 客户端版本热生效：面板改完立即用新版本出站，不必重启/重编译；
+	// 版本巡检写回配置也走这里。
+	up.SetVersions(newCfg.Upstream.ClientVersion, newCfg.Upstream.CliVersion,
+		newCfg.Upstream.IntlClientVersion, newCfg.Upstream.IntlCliVersion)
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)

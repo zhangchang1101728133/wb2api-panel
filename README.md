@@ -409,6 +409,9 @@ curl -s http://localhost:7863/v1/search/messages \
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
+| `upstream.client_version` / `cli_version` | 空 | 国内版出站 UA 的客户端版本与 CLI 版本（空 = 内置默认）。面板可改，**保存即热生效**，不用重新编译 |
+| `upstream.intl_client_version` / `intl_cli_version` | 空 | 国际版（`workbuddy-ai` 平台段）的客户端与 CLI 版本。国际端点同样按 UA 校验客户端身份，与国内版**不通用** |
+| `upstream.version_watch.*` | `enabled: true` / `6h` | 版本巡检：配了 `cn_url` / `global_url` 就按周期拉取版本源、比当前新就自动写回配置并热生效。面板「配置 → 客户端版本」有「立即检查」按钮 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `models.hidden` | `[]` | 模型黑名单：不对外暴露的模型。裸名=两域都藏；`"cn:xxx"`/`"global:xxx"`=只藏该域。`GET /v1/models` 列表过滤 + `POST /v1/chat/completions` 点名拒绝（400 `model_unavailable`）。面板保存后热生效 |
 | `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
@@ -887,10 +890,13 @@ curl -s https://your-host/v1/quota -H "Authorization: Bearer sk-xxxx"
 ### 用量与归档
 
 - `keyusage.json` 与 `usage.json` 并列：前者按「密钥 × 天」，后者按「账号 × 模型」，两条口径互不覆盖；保留 90 天，60 秒落盘一次。
-- 面板「密钥」页：新建 / 编辑 / 停用 / 轮换 / 清零 / 删除，列表显示今日请求、今日 token、累计 token、限额使用率、账号范围与最近使用时间。**明文只在新建或轮换的响应里出现一次**，之后只回显掩码。
+- 面板「密钥」页：新建 / 编辑 / 停用 / 轮换 / 清零 / 删除，列表显示今日请求、今日 token、累计 token、限额使用率、账号范围与最近使用时间。列表默认只回**掩码**，点每行的「查看」可就地展开明文、再点「复制」带走；新建 / 轮换后会弹一次明文，但不是唯一机会。
+  - 为什么能反复看：密钥本来就以明文存在 `config.json`（校验要比对原文），「只显示一次」不增加安全性，只会让人丢了 key 只能轮换、把正在用的人全打断。
+  - 代价是面板账号本身成了密钥的等价物：面板务必只经 HTTPS + 强口令（`panel.admin_key`）暴露，别把 `/panel/` 挂在公网裸奔。每次「查看」都会在服务端日志留一条 `[panel] reveal key id=… remote=…`，可事后追溯。
 - 面板「对话归档」页：按密钥 + 日期回看完整请求体、助手正文与原始响应。需要 `logging.content_archive.enabled` 与该密钥 `content_log` 同时打开，默认保留 7 天；流式回答会把 `delta` 拼成整段正文，同时保留原始 SSE 备查。
   - 两道闸是**与**关系：全局关着时，密钥上勾了 `content_log` 也不会落盘。面板会把这个状态直接标出来（勾选框置灰 + 提示去哪儿开），避免「勾了却看不到」。
   - 改完配置**立即生效**，不用重启；关掉归档只是停止写入，历史文件仍可回看，到期自动清理。
+  - **可以删**：每条记录右侧「删除」删单条；「清除本日」按当前筛选（选了密钥就只删该密钥，否则删整天）；「清空全部」要手动输入 `DELETE` 才执行。删除走「读 → 过滤 → 临时文件 → rename」，不会留下半截归档；删掉不可恢复，没有副本。
 
 ## 🖥️ Web 管理面板
 
@@ -960,8 +966,8 @@ http://127.0.0.1:7863/panel/
 | 补偿 | `GET compensation`（逐号查补偿状态，**只读**）；`POST accounts/{uid}/compensation`（单号领）；`POST compensation_all`（全量领，返回 `summary{claimed,skipped,errored,credit}`——**先看 `errored` 再看 `claimed`**，否则会把「全部查询失败」说成「没有待领补偿」） |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
-| 密钥 | `GET keys`（含各密钥今日 / 累计用量与账号候选）· `POST keys`（新建，响应里返回一次明文）· `POST keys/{id}`（部分更新）· `POST keys/{id}/rotate` · `POST keys/{id}/reset`（清零用量）· `POST keys/{id}/delete` |
-| 对话归档 | `GET content/days?key=`（有归档的日期）· `GET content?key=&date=&limit=`（默认 50 条，上限 200） |
+| 密钥 | `GET keys`（含各密钥今日 / 累计用量与账号候选）· `GET keys/{id}/secret`（取明文，仅按需调用）· `POST keys`（新建，响应里返回明文）· `POST keys/{id}`（部分更新）· `POST keys/{id}/rotate` · `POST keys/{id}/reset`（清零用量）· `POST keys/{id}/delete` |
+| 对话归档 | `GET content/days?key=`（有归档的日期）· `GET content?key=&date=&limit=`（默认 50 条，上限 200）· `POST content/delete`（`{date,key,id}` 删单条/按密钥/整天，`{all:true}` 清空全部） |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。

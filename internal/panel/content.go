@@ -5,9 +5,68 @@
 package panel
 
 import (
+	"encoding/json"
+	"io"
+	"log"
 	"net/http"
 	"strconv"
 )
+
+// contentDelete 删除归档记录：
+//
+//	all=true             → 清空全部归档文件；
+//	date + key           → 删该天该密钥的全部记录；
+//	date + id            → 只删那一条；
+//	只给 date            → 删整天的文件。
+//
+// 归档是运维自己的数据，删掉不可恢复，所以前端每一步都要求二次确认；
+// 后端只做参数校验，不做任何「保留副本」的兜底。
+func (p *Panel) contentDelete(w http.ResponseWriter, r *http.Request) {
+	rec := p.cfg.ContentLog
+	if rec == nil {
+		writeErr(w, http.StatusNotImplemented, "content archive unavailable")
+		return
+	}
+	var req struct {
+		Date string `json:"date"`
+		Key  string `json:"key"`
+		ID   string `json:"id"`
+		All  bool   `json:"all"`
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<10))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+	}
+	if req.All {
+		n, err := rec.Purge()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "purge: "+err.Error())
+			return
+		}
+		log.Printf("[panel] 清空对话归档 files=%d remote=%s", n, requestIP(r))
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "files": n})
+		return
+	}
+	if req.Date == "" {
+		writeErr(w, http.StatusBadRequest, "date required（按天归档，需指定日期）")
+		return
+	}
+	n, err := rec.Delete(req.Date, req.Key, req.ID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "delete: "+err.Error())
+		return
+	}
+	log.Printf("[panel] 删除对话归档 date=%s key=%q id=%q 条数=%d remote=%s",
+		req.Date, req.Key, req.ID, n, requestIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": n})
+}
 
 // contentDays 返回有归档的日期（可按密钥过滤），供前端下拉。
 //
@@ -55,9 +114,54 @@ func (p *Panel) contentList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// 列表只回「够生成摘要 + 够判读」的部分：正文留 600 字预览，请求/响应原样
+	// 不下发。归档里一条请求体可能十几 MB（带工具定义的 agent 流量），90 条一起
+	// 塞进 DOM 会让面板直接卡死；完整内容展开时再按 id 单条取。
+	for i := range recs {
+		recs[i].Request = nil
+		recs[i].Response = ""
+		recs[i].Text = clipText(recs[i].Text, 600)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"enabled": rec.Enabled(),
 		"records": recs,
 	})
+}
+
+// contentItem 取单条归档的完整内容（正文 + 请求体 + 原始响应），供详情展开时加载。
+func (p *Panel) contentItem(w http.ResponseWriter, r *http.Request) {
+	rec := p.cfg.ContentLog
+	if rec == nil {
+		writeErr(w, http.StatusNotImplemented, "content archive unavailable")
+		return
+	}
+	q := r.URL.Query()
+	id := q.Get("id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "id required")
+		return
+	}
+	item, err := rec.Get(q.Get("date"), id)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if item == nil {
+		writeErr(w, http.StatusNotFound, "record not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "record": item})
+}
+
+// clipText 截断预览文本（按 rune 截，避免切坏 UTF-8）。
+func clipText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }

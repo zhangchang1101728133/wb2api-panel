@@ -69,6 +69,15 @@ type Config struct {
 	// 两者都 nil 时密钥接口返回 501。
 	LoadKeys func() ([]apikey.Key, error)
 	SaveKeys func([]apikey.Key) error
+
+	// UpstreamVersions 当前生效的客户端版本（cn/global × client/cli），版本页展示用。
+	// nil = 不展示（旧装配）。
+	UpstreamVersions func() any
+	// VersionStatus 最近一次版本巡检结果（nil = 未启用巡检）。
+	VersionStatus func() any
+	// VersionCheck 立即巡检一次（同步）。nil = 接口返回 501。
+	VersionCheck func() (any, error)
+
 	// ContentLog 对话正文归档（nil = 未开启，内容接口返回 501）。
 	ContentLog *contentlog.Recorder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
@@ -211,6 +220,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	// 多密钥：一人一 key，各自用量与限额（见 keys.go）。
 	p.mux.HandleFunc("GET /panel/api/keys", p.withAuth(p.keysList))
+	// 查看密钥明文：必须显式请求（列表只回掩码），每次调用写一条日志。
+	p.mux.HandleFunc("GET /panel/api/keys/{id}/secret", p.withAuth(p.keysSecret))
 	p.mux.HandleFunc("POST /panel/api/keys", p.withAuth(p.keyCreate))
 	p.mux.HandleFunc("POST /panel/api/keys/{id}", p.withAuth(p.keyUpdate))
 	p.mux.HandleFunc("POST /panel/api/keys/{id}/delete", p.withAuth(p.keyDelete))
@@ -219,6 +230,11 @@ func (p *Panel) routes() {
 	// 对话正文归档回看（仅 admin；需要全局开关 + 该密钥 content_log）。
 	p.mux.HandleFunc("GET /panel/api/content", p.withAuth(p.contentList))
 	p.mux.HandleFunc("GET /panel/api/content/days", p.withAuth(p.contentDays))
+	p.mux.HandleFunc("GET /panel/api/content/item", p.withAuth(p.contentItem))
+	p.mux.HandleFunc("POST /panel/api/content/delete", p.withAuth(p.contentDelete))
+	// 客户端版本：当前生效值 + 「立即检查」（自动发现新版本并热生效）。
+	p.mux.HandleFunc("GET /panel/api/versions", p.withAuth(p.versions))
+	p.mux.HandleFunc("POST /panel/api/versions/check", p.withAuth(p.versionCheck))
 	p.mux.HandleFunc("GET /panel/api/compensation", p.withAuth(p.compensation))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/compensation", p.withAuth(p.accountCompensationClaim))
 	p.mux.HandleFunc("POST /panel/api/compensation_all", p.withAuth(p.compensationAll))

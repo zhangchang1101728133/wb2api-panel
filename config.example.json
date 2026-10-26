@@ -74,6 +74,18 @@
     "user_agent": "",
     "client_version": "",
     "cli_version": "",
+    "intl_client_version": "",
+    "intl_cli_version": "",
+    "version_watch": {
+      "enabled": true,
+      "interval": "6h",
+      "cn_url": "",
+      "cn_client_regex": "",
+      "cn_cli_regex": "",
+      "global_url": "",
+      "global_client_regex": "",
+      "global_cli_regex": ""
+    },
     "client_name": "",
     "device_token": "",
     "device_token_file": "",

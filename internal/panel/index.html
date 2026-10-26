@@ -1021,6 +1021,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <label class="sel-note">密钥 <select id="ctKey"><option value="">全部密钥</option></select></label>
           <label class="sel-note">日期 <select id="ctDate"></select></label>
           <button class="xs" id="btnCtRefresh">刷新</button>
+          <button class="xs" id="btnCtClearDay" title="删除当前筛选范围内的归档（全部密钥时删整天）">清除本日</button>
+          <button class="xs danger" id="btnCtPurge" title="删除全部归档文件">清空全部</button>
         </header>
         <div class="pad">
           <span class="note" id="ctNote">—</span>
@@ -1211,7 +1213,57 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="grid2">
               <label class="fld"><span class="lb">出站 User-Agent</span>
                 <input name="user_agent" placeholder="留空 = CLI/2.63.2 CodeBuddy/2.63.2">
-                <span class="hint">影响官网积分记录「使用端」显示；需重启</span></label>
+                <span class="hint">影响官网积分记录「使用端」显示。留空 = 按下方版本号自动拼装</span></label>
+            </div>
+
+            <!-- 客户端版本：上游按 UA 校验客户端身份，版本过老会 11140 / 请求非法。
+                 保存即热生效（不需要重启、不需要重新编译）。 -->
+            <div class="hr"></div>
+            <div class="lb" style="margin-bottom:6px">客户端版本 <span class="hint" id="verNow"></span></div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">国内版 客户端</span>
+                <input name="upstream_client_version" placeholder="留空 = 内置默认">
+                <span class="hint">UA 的 WorkBuddy/&lt;版本&gt; 与 X-IDE-Version</span></label>
+              <label class="fld"><span class="lb">国内版 CLI</span>
+                <input name="upstream_cli_version" placeholder="留空 = 内置默认">
+                <span class="hint">UA 的 CLI/&lt;版本&gt; 段</span></label>
+            </div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">国际版 客户端</span>
+                <input name="upstream_intl_client_version" placeholder="留空 = 内置默认">
+                <span class="hint">workbuddy-ai 平台段，与国内版不通用</span></label>
+              <label class="fld"><span class="lb">国际版 CLI</span>
+                <input name="upstream_intl_cli_version" placeholder="留空 = 内置默认">
+                <span class="hint">国际端点同样校验 CLI 段</span></label>
+            </div>
+
+            <div class="hr"></div>
+            <div class="lb" style="margin-bottom:6px">自动检查更新
+              <span class="hint" id="vwStatus">—</span>
+              <button type="button" class="xs" id="btnVerCheck" style="margin-left:8px">立即检查</button>
+            </div>
+            <div class="grid2">
+              <div class="switch"><span class="lb">启用定时巡检</span>
+                <input type="checkbox" name="vw_enabled"></div>
+              <label class="fld"><span class="lb">巡检周期</span>
+                <input name="vw_interval" placeholder="6h">
+                <span class="hint">Go 时长，如 6h / 30m；最小 1m</span></label>
+            </div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">国内版版本源</span>
+                <input name="vw_cn_url" placeholder="https://… 或 /path/product.json（留空 = 不自动检查）">
+                <span class="hint">从该文本里抓版本号；支持本地文件路径</span></label>
+              <label class="fld"><span class="lb">国内版正则（可选）</span>
+                <input name="vw_cn_regex" placeholder="([0-9]+\.[0-9]+\.[0-9]+)">
+                <span class="hint">留空 = 取文本里第 1 个 x.y.z 当客户端版本、第 2 个当 CLI</span></label>
+            </div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">国际版版本源</span>
+                <input name="vw_global_url" placeholder="https://… 或 /path/product.json">
+                <span class="hint">同上</span></label>
+              <label class="fld"><span class="lb">国际版正则（可选）</span>
+                <input name="vw_global_regex" placeholder="([0-9]+\.[0-9]+\.[0-9]+)">
+                <span class="hint">留空 = 默认顺序</span></label>
             </div>
             <div class="hr"></div>
             <div class="grid2">
@@ -1353,7 +1405,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   <div class="dlg wide">
     <header>
       <h3 id="keyEditorTitle">新建密钥</h3>
-      <div class="hint">一人一 key：用量、限额、可用账号互不影响；明文只在创建 / 轮换后显示一次。</div>
+      <div class="hint">一人一 key：用量、限额、可用账号互不影响；明文随时可在列表里点「查看」取回。</div>
     </header>
     <div class="body">
       <div class="grid2">
@@ -1424,12 +1476,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   </div>
 </div>
 
-<!-- 新密钥明文：只显示这一次 -->
+<!-- 新密钥明文：创建/轮换后弹一次，之后可在列表里点「查看」再取 -->
 <div class="veil" id="keySecretVeil">
   <div class="dlg" style="width:560px">
     <header>
-      <h3>新密钥（只显示这一次）</h3>
-      <div class="hint">关掉就再也看不到明文了；丢了只能轮换。</div>
+      <h3>新密钥</h3>
+      <div class="hint">关掉不影响保存；之后在密钥列表里点「查看」可随时再看一次。</div>
     </header>
     <div class="body">
       <div class="inline"><input id="keyNewValue" readonly>

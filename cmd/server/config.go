@@ -18,6 +18,32 @@ import (
 )
 
 // Config 顶层配置。
+// VersionWatch 客户端版本巡检配置（upstream.version_watch）。
+//
+// 目的：上游随时会提高客户端版本门槛，版本过老就 11140 / 请求非法。这件事
+// 以前只能改常量重编译；现在四个版本号都能在面板改（热生效），并且可以配置
+// 版本源让网关自己发现新版本。
+type VersionWatch struct {
+	// Enabled 缺省 true（配了 URL 才真正会去拉；没配就只保留手动更新）。
+	Enabled *bool `json:"enabled"`
+	// Interval 巡检周期（Go 时长，默认 6h，最小 1m）。
+	Interval string `json:"interval"`
+
+	// 版本源：URL 支持 http(s)，也支持本地文件（/path/to/product.json）。
+	// 正则从响应文本里抓版本号；留空则按「文档里第一个 x.y.z 是客户端版本、
+	// 第二个是 CLI 版本」的默认顺序取。
+	CNURL         string `json:"cn_url"`
+	CNClientRegex string `json:"cn_client_regex"`
+	CNCliRegex    string `json:"cn_cli_regex"`
+
+	GlobalURL         string `json:"global_url"`
+	GlobalClientRegex string `json:"global_client_regex"`
+	GlobalCliRegex    string `json:"global_cli_regex"`
+}
+
+// EnabledOrNil 判断巡检是否启用（缺省 true）。
+func (v VersionWatch) EnabledOrNil() bool { return v.Enabled == nil || *v.Enabled }
+
 type Config struct {
 	Listen    string `json:"listen"`     // ":7863"
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
@@ -179,6 +205,14 @@ type Config struct {
 		ClientVersion string `json:"client_version"`
 		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
 		CliVersion string `json:"cli_version"`
+		// IntlClientVersion 国际版（workbuddy-ai）客户端版本段。空 = 内置默认 5.8.4。
+		// 与国内版分开：国际端点会按 UA 校验客户端身份，两区版本不通用。
+		IntlClientVersion string `json:"intl_client_version"`
+		// IntlCliVersion 国际版 CLI 版本段。空 = 内置默认 2.161.0。
+		IntlCliVersion string `json:"intl_cli_version"`
+		// VersionWatch 客户端版本巡检：定期从配置的版本源取最新版本号，比当前新就
+		// 自动写回并热生效（防止上游升级后 11140/请求非法）。
+		VersionWatch VersionWatch `json:"version_watch"`
 		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
 		ClientName string `json:"client_name"`
@@ -281,6 +315,8 @@ type Config struct {
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	TaskSweepInterval      time.Duration `json:"-"` // 0 = 不启动（task_sweep_enabled=false）
+	// VersionWatchInterval 客户端版本巡检周期（upstream.version_watch.interval）。
+	VersionWatchInterval time.Duration `json:"-"`
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
@@ -682,7 +718,31 @@ func (c *Config) normalize() error {
 	if err := c.validateScheduleHours(); err != nil {
 		return err
 	}
+	if err := c.normalizeVersionWatch(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
+}
+
+// normalizeVersionWatch 版本巡检：interval 校验 + 缺省 6h；enabled 缺省 true。
+func (c *Config) normalizeVersionWatch() error {
+	vw := &c.Upstream.VersionWatch
+	if vw.Interval == "" {
+		vw.Interval = "6h"
+	}
+	d, err := time.ParseDuration(vw.Interval)
+	if err != nil {
+		return fmt.Errorf("upstream.version_watch.interval: %w", err)
+	}
+	if d < time.Minute {
+		d = time.Minute
+	}
+	c.VersionWatchInterval = d
+	if vw.Enabled == nil {
+		t := true
+		vw.Enabled = &t
+	}
+	return nil
 }
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。

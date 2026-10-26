@@ -748,6 +748,15 @@ type Client struct {
 	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认（官方内置 CLI 2.137.1）。
 	CliVersion string
 
+	// IntlClientVersion / IntlCLIVersion 国际版（workbuddy-ai）专用版本号。
+	// 空 = 内置默认（5.8.4 / 2.161.0）。与国内版分开是因为国际端点按 UA 校验
+	// 客户端身份，两区版本不通用。
+	IntlClientVersion string
+	IntlCLIVersion    string
+
+	// verMu 串行化版本字段的热更新（面板保存 / 版本巡检），出站请求并发读。
+	verMu sync.RWMutex
+
 	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 	// 空 = 旧行为：X-Product="SaaS"，不设 X-IDE-*（向后兼容，不突变归因）。
 	ClientName string

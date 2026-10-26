@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -149,6 +150,68 @@ func (p *Panel) keysList(w http.ResponseWriter, r *http.Request) {
 		"accounts":         p.accountChoices(),
 		"content_archive":  contentArchive,
 	})
+}
+
+// keysSecret 返回某个密钥的明文，供面板「查看」按钮按需取用。
+//
+// 为什么要能反复看：密钥本来就以明文存在 config.json 里（校验时必须比对原文），
+// 「只在创建时显示一次」并不增加任何安全性，却让运维丢了 key 只能轮换、把正在
+// 用的人全部打断。所以改成随时可取——但列表接口仍然只回掩码，必须显式点一次，
+// 避免打开页面就把所有密钥铺在屏幕上；每次查看也记一条日志，便于事后追溯。
+func (p *Panel) keysSecret(w http.ResponseWriter, r *http.Request) {
+	if !p.keysAvailable(w) {
+		return
+	}
+	id := r.PathValue("id")
+	keys, err := p.cfg.LoadKeys()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "load keys: "+err.Error())
+		return
+	}
+	for _, k := range keys {
+		if k.ID != id {
+			continue
+		}
+		log.Printf("[panel] reveal key id=%s remote=%s ua=%q",
+			id, requestIP(r), clipUA(r.UserAgent(), 80))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"id":     k.ID,
+			"name":   k.Name,
+			"key":    k.Key,
+			"masked": apikey.Mask(k.Key),
+		})
+		return
+	}
+	writeErr(w, http.StatusNotFound, "key not found")
+}
+
+// requestIP 取调用方 IP：X-Forwarded-For 首段 → X-Real-IP → TCP 对端。
+func requestIP(r *http.Request) string {
+	if v := r.Header.Get("X-Forwarded-For"); v != "" {
+		if i := strings.IndexByte(v, ','); i >= 0 {
+			v = v[:i]
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-Real-IP")); v != "" {
+		return v
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// clipUA 截断 User-Agent（日志里不需要整段，也避免被塞超长串）。
+func clipUA(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // accountChoices 账号候选（密钥的可用账号多选用）。

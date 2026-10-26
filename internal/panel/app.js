@@ -358,7 +358,7 @@ function go(v) {
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
-  if (v === 'config') loadConfig();
+  if (v === 'config') { loadConfig(); loadVersions(); }
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'keys') loadKeys();
@@ -1154,6 +1154,16 @@ const CFG_MAP = {
   ttl: ['session_sticky', 'ttl'],
   timeout_seconds: ['upstream', 'timeout_seconds'], header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],
+  upstream_client_version: ['upstream', 'client_version'],
+  upstream_cli_version: ['upstream', 'cli_version'],
+  upstream_intl_client_version: ['upstream', 'intl_client_version'],
+  upstream_intl_cli_version: ['upstream', 'intl_cli_version'],
+  vw_enabled: ['upstream', 'version_watch', 'enabled'],
+  vw_interval: ['upstream', 'version_watch', 'interval'],
+  vw_cn_url: ['upstream', 'version_watch', 'cn_url'],
+  vw_cn_regex: ['upstream', 'version_watch', 'cn_client_regex'],
+  vw_global_url: ['upstream', 'version_watch', 'global_url'],
+  vw_global_regex: ['upstream', 'version_watch', 'global_client_regex'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
@@ -1172,7 +1182,10 @@ const CFG_MAP = {
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
  */
-const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file']);
+const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file',
+  'upstream_client_version', 'upstream_cli_version',
+  'upstream_intl_client_version', 'upstream_intl_cli_version',
+  'vw_cn_url', 'vw_cn_regex', 'vw_global_url', 'vw_global_regex']);
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function put(obj, path, val) {
@@ -1184,8 +1197,7 @@ function put(obj, path, val) {
 async function loadConfig() {
   try {
     const d = await api('config');
-    cfgLoaded = d.config;
-    $('cfgPath').textContent = d.path || '';
+    cfgLoaded = d.config;    $('cfgPath').textContent = d.path || '';
     const f = $('cfgForm');
     for (const [name, path] of Object.entries(CFG_MAP)) {
       const el = f.elements[name];
@@ -1251,8 +1263,55 @@ $('btnEye').onclick = () => {
   el.type = show ? 'text' : 'password';
   $('btnEye').textContent = show ? '隐藏' : '显示';
 };
-$('btnCfgReload').onclick = loadConfig;
-$('cfgForm').onsubmit = async ev => {
+if ($('btnCfgReload')) $('btnCfgReload').onclick = loadConfig;
+
+/* ── 客户端版本 ─────────────────────────────────────────────────────
+   当前生效值来自上游客户端的实时字段（配置改了立刻变），巡检状态来自最近一次
+   「拉版本源 → 比对 → 写回」。立即检查会同步跑一次，成功后配置已落盘并热生效。 */
+async function loadVersions() {
+  const now = $('verNow'), st = $('vwStatus');
+  if (!now && !st) return;
+  try {
+    const d = await api('versions');
+    const e = d.effective || {};
+    if (now) {
+      const cn = e.cn || {}, gl = e.global || {};
+      now.textContent = '生效中：国内 ' + (cn.client || '?') + ' / CLI ' + (cn.cli || '?') +
+        ' · 国际 ' + (gl.client || '?') + ' / CLI ' + (gl.cli || '?');
+    }
+    if (st) {
+      const w = d.watch || {};
+      st.textContent = w.last_check
+        ? '上次检查 ' + new Date(w.last_check).toLocaleString() +
+          (w.last_error ? ' · 失败：' + w.last_error : (w.last_note ? ' · ' + w.last_note : ''))
+        : '还没检查过';
+    }
+  } catch (err) {
+    if (st) st.textContent = '读取失败：' + err.message;
+  }
+}
+if ($('btnVerCheck')) $('btnVerCheck').onclick = async () => {
+  const btn = $('btnVerCheck');
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '检查中…';
+  try {
+    const d = await api('versions/check', { method: 'POST' });
+    if (d.ok) {
+      const ch = (d.watch && d.watch.changed) || [];
+      toast(ch.length ? ('已更新：' + ch.join('、')) : '已是最新版本');
+    } else {
+      toast('检查未完成：' + (d.error || '未知原因'), 'bad');
+    }
+    await loadVersions();
+    await loadConfig(); // 版本号可能被自动写回，表单要跟着刷新
+  } catch (err) {
+    toast(err.message, 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+};$('cfgForm').onsubmit = async ev => {
   ev.preventDefault();
   // 时长字段脏值拦截：标红 + toast 点名，不发保存请求（后端同样会拒，这里前置）。
   markDurationFields();
@@ -3662,7 +3721,10 @@ function renderKeys() {
     return '<tr data-id="' + esc(k.id) + '">' +
       '<td><div class="nm">' + esc(k.name || k.id) + '</div>' +
         '<div class="hint" style="font-size:11px;color:var(--ink-3)">' + esc(k.id) + note + '</div></td>' +
-      '<td><code>' + esc(k.masked) + '</code></td>' +
+      '<td><code class="kv" data-masked="' + esc(k.masked) + '">' + esc(k.masked) + '</code>' +
+        '<div style="margin-top:3px;white-space:nowrap">' +
+        '<button class="xs" data-act="reveal">查看</button> ' +
+        '<button class="xs" data-act="copy" hidden>复制</button></div></td>' +
       '<td>' + status + '</td>' +
       '<td>' + fmtNum(t.requests) +
         '<div class="hint" style="font-size:11px;color:var(--ink-3)">失败 ' + fmtNum(t.failed) + '</div></td>' +
@@ -3742,7 +3804,7 @@ if ($('btnKeySave')) $('btnKeySave').onclick = async () => {
       const d = await api('keys', { method: 'POST', body: JSON.stringify(body) });
       closeVeil('keyVeil');
       showNewKey(d.key);
-      toast('密钥已创建，明文只显示这一次');
+      toast('密钥已创建；之后可在列表里点「查看」再取明文');
     }
     loadKeys();
   } catch (e) { toast(e.message, 'bad'); }
@@ -3789,6 +3851,28 @@ if ($('keyModelCustomWrap')) $('keyModelCustomWrap').addEventListener('click', e
   renderKeyModelCustom();
 });
 
+/* toggleKeySecret 就地展开 / 收回某个密钥的明文。
+   列表接口只回掩码，明文必须显式点「查看」才向后端要——避免一打开页面
+   所有 key 就平铺在屏幕上（录屏、投屏、旁人一眼就看全了）。 */
+async function toggleKeySecret(tr) {
+  const code = tr.querySelector('code.kv');
+  if (!code) return;
+  const btn = tr.querySelector('button[data-act="reveal"]');
+  const copy = tr.querySelector('button[data-act="copy"]');
+  if (code.dataset.shown === '1') {
+    code.textContent = code.dataset.masked;
+    code.dataset.shown = '';
+    if (btn) btn.textContent = '查看';
+    if (copy) copy.hidden = true;
+    return;
+  }
+  const d = await api('keys/' + encodeURIComponent(tr.dataset.id) + '/secret');
+  code.textContent = d.key || '';
+  code.dataset.shown = '1';
+  if (btn) btn.textContent = '隐藏';
+  if (copy) copy.hidden = false;
+}
+
 if ($('keysBody')) $('keysBody').addEventListener('click', async e => {
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
@@ -3800,6 +3884,15 @@ if ($('keysBody')) $('keysBody').addEventListener('click', async e => {
   const path = 'keys/' + encodeURIComponent(id);
   try {
     if (act === 'edit') { openKeyEditor(k); return; }
+    if (act === 'reveal') { await toggleKeySecret(tr); return; }
+    if (act === 'copy') {
+      const code = tr.querySelector('code.kv');
+      const v = code && code.textContent;
+      if (!v) return;
+      try { await navigator.clipboard.writeText(v); toast('已复制'); }
+      catch (err) { toast('复制失败，请手动选中', 'bad'); }
+      return;
+    }
     if (act === 'toggle') {
       await api(path, { method: 'POST', body: JSON.stringify({ enabled: !k.enabled }) });
       toast(k.enabled ? '已停用' : '已启用');
@@ -3807,7 +3900,7 @@ if ($('keysBody')) $('keysBody').addEventListener('click', async e => {
       if (!confirm('轮换后旧 key 立即失效，正在使用的人需要换新 key。确认轮换？')) return;
       const d = await api(path + '/rotate', { method: 'POST' });
       showNewKey(d.key);
-      toast('已轮换，新密钥只显示这一次');
+      toast('已轮换；旧 key 立即失效，新 key 可随时在列表里点「查看」');
     } else if (act === 'reset') {
       if (!confirm('清零该密钥的用量统计与 RPM 窗口？（不影响账号与密钥本身）')) return;
       await api(path + '/reset', { method: 'POST' });
@@ -3877,7 +3970,7 @@ function renderContent() {
     list.innerHTML = '<div class="empty">这一天没有记录</div>';
     return;
   }
-  list.innerHTML = ctRecords.map(r => {
+  list.innerHTML = ctRecords.map((r, i) => {
     const ok = r.status >= 200 && r.status < 300;
     const toks = (r.prompt_tokens || 0) + (r.completion_tokens || 0);
     const when = r.time ? new Date(r.time).toLocaleString() : '—';
@@ -3890,18 +3983,29 @@ function renderContent() {
       (r.stream ? ' · 流式' : '') +
       (r.truncated ? ' · 已截断' : '') +
       (r.account ? ' · ' + esc(r.account) : '') +
-      '</span></summary>';
+      '</span>' +
+      '<button class="xs danger" data-act="ct-del" data-i="' + i + '"' +
+      ' style="float:right" title="删除这一条归档">删除</button>' +
+      '</summary>';
     const pre = 'white-space:pre-wrap;word-break:break-word;overflow:auto;background:var(--surface-2);padding:10px;border-radius:8px;margin:4px 0 0';
-    const body =
-      '<div style="display:grid;gap:10px;padding:6px 0 12px">' +
-      (r.text
-        ? '<div><div class="lb">助手正文</div><pre style="' + pre + ';max-height:420px">' + esc(r.text) + '</pre></div>'
-        : '<div class="hint" style="color:var(--ink-3)">本条没有可读正文（工具调用 / 仅推理型响应），展开「原始响应」看完整帧。</div>') +
-      '<div><div class="lb">请求</div><pre style="' + pre + ';max-height:320px">' + esc(prettyJSON(r.request)) + '</pre></div>' +
-      (r.response ? '<details><summary style="cursor:pointer;color:var(--ink-3)">原始响应</summary><pre style="' + pre + ';max-height:420px">' + esc(r.response) + '</pre></details>' : '') +
-      '</div>';
-    return '<details style="border-bottom:1px solid var(--line-soft)">' + summary + body + '</details>';
+    // 正文/请求/响应都不在这里渲染：归档单条可能有十几 MB，展开时再按 id 取。
+    const body = '<div class="ct-body" data-loaded="0">' +
+      '<div class="hint" style="color:var(--ink-3);padding:4px 0">展开这一条后加载完整请求与响应…</div></div>';
+    return '<details style="border-bottom:1px solid var(--line-soft)" data-date="' + esc((r.time || '').slice(0, 10)) +
+      '" data-id="' + esc(r.id) + '">' + summary + body + '</details>';
   }).join('');
+}
+
+// ctBodyHtml 渲染单条归档的完整内容（由 content/item 返回）。
+function ctBodyHtml(r) {
+  const pre = 'white-space:pre-wrap;word-break:break-word;overflow:auto;background:var(--surface-2);padding:10px;border-radius:8px;margin:4px 0 0';
+  return '<div style="display:grid;gap:10px;padding:6px 0 12px">' +
+    (r.text
+      ? '<div><div class="lb">助手正文</div><pre style="' + pre + ';max-height:420px">' + esc(r.text) + '</pre></div>'
+      : '<div class="hint" style="color:var(--ink-3)">本条没有可读正文（工具调用 / 仅推理型响应），展开「原始响应」看完整帧。</div>') +
+    '<div><div class="lb">请求</div><pre style="' + pre + ';max-height:320px">' + esc(prettyJSON(r.request)) + '</pre></div>' +
+    (r.response ? '<details><summary style="cursor:pointer;color:var(--ink-3)">原始响应</summary><pre style="' + pre + ';max-height:420px">' + esc(r.response) + '</pre></details>' : '') +
+    '</div>';
 }
 
 function prettyJSON(v) {
@@ -3915,3 +4019,64 @@ function prettyJSON(v) {
 if ($('btnCtRefresh')) $('btnCtRefresh').onclick = () => loadContent();
 if ($('ctKey')) $('ctKey').onchange = () => loadContent();
 if ($('ctDate')) $('ctDate').onchange = () => loadContent();
+
+/* 删除归档：单条 / 按当前筛选清除 / 清空全部。归档不保留副本，全部二次确认。 */
+async function deleteContent(body, okMsg) {
+  const d = await api('content/delete', { method: 'POST', body: JSON.stringify(body) });
+  toast(okMsg + (typeof d.deleted === 'number' && d.deleted > 0 ? '（' + d.deleted + ' 条）' : ''));
+  await loadContent();
+}
+
+if ($('ctList')) $('ctList').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-act="ct-del"]');
+  if (!b) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const r = ctRecords[Number(b.dataset.i)];
+  if (!r) return;
+  if (!confirm('删除这条归档？删除后不可恢复。')) return;
+  const date = (r.time || '').slice(0, 10);
+  try { await deleteContent({ date, id: r.id }, '已删除'); }
+  catch (err) { toast(err.message, 'bad'); }
+});
+
+/* 展开详情才拉完整内容：列表只有摘要，单条归档可能十几 MB。
+   toggle 事件不冒泡，所以用捕获阶段监听。 */
+if ($('ctList')) $('ctList').addEventListener('toggle', async e => {
+  const d = e.target;
+  if (!d || d.tagName !== 'DETAILS' || !d.open) return;
+  const box = d.querySelector('.ct-body');
+  if (!box || box.dataset.loaded === '1') return;
+  box.dataset.loaded = '1';
+  box.innerHTML = '<div class="hint" style="color:var(--ink-3);padding:4px 0">加载中…</div>';
+  try {
+    const r = await api('content/item?date=' + encodeURIComponent(d.dataset.date || '') +
+      '&id=' + encodeURIComponent(d.dataset.id || ''));
+    box.innerHTML = ctBodyHtml(r.record || {});
+  } catch (err) {
+    box.dataset.loaded = '0'; // 失败允许重试
+    box.innerHTML = '<div class="hint" style="color:var(--bad)">加载失败：' + esc(err.message) + '</div>';
+  }
+}, true);
+
+if ($('btnCtClearDay')) $('btnCtClearDay').onclick = async () => {
+  const key = $('ctKey') ? $('ctKey').value : '';
+  const date = $('ctDate') ? $('ctDate').value : '';
+  if (!date) { toast('没有可清除的日期', 'bad'); return; }
+  const who = key ? ('密钥 ' + key + ' 在 ') : '';
+  const tip = key ? '' : '（整天，含所有密钥）';
+  if (!confirm('删除 ' + who + date + tip + ' 的归档？删除后不可恢复。')) return;
+  try { await deleteContent({ date, key }, '已清除'); }
+  catch (err) { toast(err.message, 'bad'); }
+};
+
+if ($('btnCtPurge')) $('btnCtPurge').onclick = async () => {
+  if (!confirm('清空全部对话归档？所有密钥、所有日期的记录都会被删除，不可恢复。')) return;
+  const v = prompt('这一步不可恢复。确认请输入 DELETE：');
+  if (v !== 'DELETE') { toast('已取消'); return; }
+  try {
+    const d = await api('content/delete', { method: 'POST', body: JSON.stringify({ all: true }) });
+    toast('已清空' + (d.files ? '（' + d.files + ' 个文件）' : ''));
+    await loadContent();
+  } catch (err) { toast(err.message, 'bad'); }
+};

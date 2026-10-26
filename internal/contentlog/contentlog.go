@@ -61,6 +61,7 @@ type Recorder struct {
 	keepDays atomic.Int64
 
 	mu      sync.RWMutex // 保护 ch/stop/done/enabled
+	fileMu  sync.Mutex   // 串行化写盘与删除/清空（删除要重写整个日文件）
 	ch      chan Record
 	stop    chan struct{}
 	done    chan struct{}
@@ -227,6 +228,10 @@ func (r *Recorder) write(rec Record) {
 		log.Printf("WARN: [contentlog] 序列化失败: %v", err)
 		return
 	}
+	// fileMu 与删除/清空互斥：删除是「读全文 → 重写 → rename」，若此时有 app 写
+	// 进旧 inode，rename 后那一行就丢了。
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		log.Printf("WARN: [contentlog] 打开 %s 失败: %v", path, err)
@@ -236,6 +241,208 @@ func (r *Recorder) write(rec Record) {
 		log.Printf("WARN: [contentlog] 写入 %s 失败: %v", path, err)
 	}
 	_ = f.Close()
+}
+
+// Delete 删除归档记录，返回实际删除的条数。
+//
+//   - date 必填（归档按天分文件），为空按今天；
+//   - id 非空：只删这一条；
+//   - 否则 key 非空：删该天该密钥的全部记录；
+//   - 都不给：删掉这一天的整个文件。
+//
+// 单条/按密钥删除走「读 → 过滤 → 写临时文件 → rename」，因此不会留下半截文件。
+func (r *Recorder) Delete(date, key, id string) (int, error) {
+	if r == nil || r.dir == "" {
+		return 0, fmt.Errorf("content archive unavailable")
+	}
+	if date == "" {
+		date = time.Now().In(cst).Format("2006-01-02")
+	}
+	if _, err := time.ParseInLocation("2006-01-02", date, cst); err != nil {
+		return 0, fmt.Errorf("invalid date %q", date)
+	}
+	path := filepath.Join(r.dir, date+".jsonl")
+
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
+
+	if id == "" && key == "" {
+		// 整天删除：先数一下条数，返回值对用户有意义（面板提示「已清除 N 条」）。
+		recs, rerr := readRecords(path)
+		if rerr != nil {
+			if os.IsNotExist(rerr) {
+				return 0, nil
+			}
+			return 0, rerr
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return 0, err
+		}
+		log.Printf("[contentlog] 已删除整天归档 %s（%d 条）", date, len(recs))
+		return len(recs), nil
+	}
+
+	recs, err := readRecords(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	kept := make([]Record, 0, len(recs))
+	removed := 0
+	for _, rec := range recs {
+		match := false
+		if id != "" {
+			match = rec.ID == id
+		} else {
+			match = rec.Key == key
+		}
+		if match {
+			removed++
+			continue
+		}
+		kept = append(kept, rec)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	if len(kept) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return 0, err
+		}
+		log.Printf("[contentlog] 已删除归档 %s key=%q id=%q（文件已空，整日移除）", date, key, id)
+		return removed, nil
+	}
+	if err := writeRecords(path, kept); err != nil {
+		return 0, err
+	}
+	log.Printf("[contentlog] 已删除归档记录 date=%s key=%q id=%q 共 %d 条", date, key, id, removed)
+	return removed, nil
+}
+
+// Purge 删除全部归档文件，返回删除的文件数。
+func (r *Recorder) Purge() (int, error) {
+	if r == nil || r.dir == "" {
+		return 0, fmt.Errorf("content archive unavailable")
+	}
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
+	entries, err := os.ReadDir(r.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".jsonl") && !strings.HasSuffix(e.Name(), ".jsonl.tmp") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(r.dir, e.Name())); err == nil {
+			n++
+		}
+	}
+	log.Printf("[contentlog] 已清空归档目录 %s（%d 个文件）", r.dir, n)
+	return n, nil
+}
+
+// Get 取单条归档的完整记录（date 为空 = 今天）。找不到返回 (nil, nil)。
+func (r *Recorder) Get(date, id string) (*Record, error) {
+	if r == nil || r.dir == "" {
+		return nil, fmt.Errorf("content archive unavailable")
+	}
+	if date == "" {
+		date = time.Now().In(cst).Format("2006-01-02")
+	}
+	if _, err := time.ParseInLocation("2006-01-02", date, cst); err != nil {
+		return nil, fmt.Errorf("invalid date %q", date)
+	}
+	if id == "" {
+		return nil, fmt.Errorf("id required")
+	}
+	recs, err := readRecords(filepath.Join(r.dir, date+".jsonl"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	for i := range recs {
+		if recs[i].ID == id {
+			rec := recs[i]
+			return &rec, nil
+		}
+	}
+	return nil, nil
+}
+
+// readRecords 读取整天文件（跳过坏行）。
+func readRecords(path string) ([]Record, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	out := make([]Record, 0, 128)
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 8<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec Record
+		if json.Unmarshal(line, &rec) != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out, sc.Err()
+}
+
+// writeRecords 用临时文件 + rename 整份重写（同目录，保证原子）。
+func writeRecords(path string, recs []Record) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	w := bufio.NewWriter(f)
+	for i := range recs {
+		raw, err := json.Marshal(recs[i])
+		if err != nil {
+			continue
+		}
+		if _, err := w.Write(append(raw, '\n')); err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	if err := w.Flush(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // prune 删除超过保留期的日文件。

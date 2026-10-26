@@ -42,18 +42,68 @@ func originRefererFor(a *auth.Auth) string {
 // clientVersion 生效的 WorkBuddy 客户端版本：Client.ClientVersion 非空则取之，
 // 否则内置默认 defaultClientVersion。
 func (c *Client) clientVersion() string {
-	if c != nil && c.ClientVersion != "" {
-		return c.ClientVersion
+	c.verMu.RLock()
+	v := c.ClientVersion
+	c.verMu.RUnlock()
+	if v != "" {
+		return v
 	}
 	return defaultClientVersion
 }
 
 // cliVersion 生效的 CLI 版本：Client.CliVersion 非空则取之，否则内置默认 defaultCliVersion。
 func (c *Client) cliVersion() string {
-	if c != nil && c.CliVersion != "" {
-		return c.CliVersion
+	c.verMu.RLock()
+	v := c.CliVersion
+	c.verMu.RUnlock()
+	if v != "" {
+		return v
 	}
 	return defaultCliVersion
+}
+
+// intlClientVersion 国际版客户端版本（config upstream.intl_client_version 可覆盖）。
+func (c *Client) intlClientVersion() string {
+	c.verMu.RLock()
+	v := c.IntlClientVersion
+	c.verMu.RUnlock()
+	if v != "" {
+		return v
+	}
+	return defaultIntlClientVersion
+}
+
+// intlCLIVersion 国际版 CLI 版本（config upstream.intl_cli_version 可覆盖）。
+func (c *Client) intlCLIVersion() string {
+	c.verMu.RLock()
+	v := c.IntlCLIVersion
+	c.verMu.RUnlock()
+	if v != "" {
+		return v
+	}
+	return defaultIntlCLIVersion
+}
+
+// SetVersions 热更新四组版本号（面板保存配置、版本巡检自动发现时调用）。
+// 空串 = 该域回到内置默认。加锁是因为出站请求在并发读这四个字段。
+func (c *Client) SetVersions(cnClient, cnCLI, intlClient, intlCLI string) {
+	if c == nil {
+		return
+	}
+	c.verMu.Lock()
+	c.ClientVersion = cnClient
+	c.CliVersion = cnCLI
+	c.IntlClientVersion = intlClient
+	c.IntlCLIVersion = intlCLI
+	c.verMu.Unlock()
+}
+
+// Versions 返回当前生效的四组版本号（面板展示用）。
+func (c *Client) Versions() (cnClient, cnCLI, intlClient, intlCLI string) {
+	if c == nil {
+		return defaultClientVersion, defaultCliVersion, defaultIntlClientVersion, defaultIntlCLIVersion
+	}
+	return c.clientVersion(), c.cliVersion(), c.intlClientVersion(), c.intlCLIVersion()
 }
 
 // defaultWorkBuddyUAFor 组装默认客户端出站 UA（官方桌面端 RestOperations 层形状）：
@@ -70,11 +120,11 @@ func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {
 	if a != nil && a.IsGlobal() {
 		// 国际版桌面端 applicationName = `workbuddy-ai`（小写连字符），
 		// 不是 productName 的 `WorkBuddy AI`——后者会被判非法客户端。
-		// 版本固定取 intl 实测值：config 的 client_version 是全局单值，
-		// 无法同时表达两区版本，混用同样会被判非法。
+		// 版本走 intl 专用配置（upstream.intl_client_version / intl_cli_version），
+		// 与国内版分开，面板可改、版本巡检可自动更新。
 		platform = "workbuddy-ai"
-		ver = defaultIntlClientVersion
-		cli = defaultIntlCLIVersion
+		ver = c.intlClientVersion()
+		cli = c.intlCLIVersion()
 	}
 	return "WorkBuddy/" + ver + " " + platform + "/" + ver + " CLI/" + cli
 }
@@ -359,7 +409,7 @@ func (c *Client) attributionClientName() string {
 // 国际版有独立版本号，config 未显式覆盖时走 intl 默认值。
 func (c *Client) clientVersionFor(a *auth.Auth) string {
 	if a != nil && a.IsGlobal() {
-		return defaultIntlClientVersion
+		return c.intlClientVersion()
 	}
 	return c.clientVersion()
 }

@@ -158,6 +158,73 @@ func TestHotToggle(t *testing.T) {
 
 func jsonRaw(s string) []byte { return []byte(s) }
 
+// 删除归档：单条 / 按密钥 / 整天 / 清空，且删除后 Days 与 Query 立即反映。
+func TestDeleteAndPurge(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir, 7)
+	r.SetEnabled(true)
+	now := time.Now().In(cst)
+	date := now.Format("2006-01-02")
+
+	r.Append(Record{ID: "a1", Time: now, Key: "alice", Status: 200})
+	r.Append(Record{ID: "a2", Time: now, Key: "alice", Status: 200})
+	r.Append(Record{ID: "b1", Time: now, Key: "bob", Status: 200})
+	r.Stop() // 排空队列
+
+	// 单条
+	n, err := r.Delete(date, "", "a1")
+	if err != nil || n != 1 {
+		t.Fatalf("删单条 n=%d err=%v", n, err)
+	}
+	recs, _ := r.Query("alice", date, 10)
+	if len(recs) != 1 || recs[0].ID != "a2" {
+		t.Fatalf("删单条后 alice=%+v", recs)
+	}
+
+	// 按密钥
+	n, err = r.Delete(date, "alice", "")
+	if err != nil || n != 1 {
+		t.Fatalf("按密钥删 n=%d err=%v", n, err)
+	}
+	if recs, _ := r.Query("alice", date, 10); len(recs) != 0 {
+		t.Fatalf("alice 应已清空: %+v", recs)
+	}
+	if days := r.Days("alice"); len(days) != 0 {
+		t.Fatalf("alice 不应再有归档日期: %v", days)
+	}
+	if recs, _ := r.Query("bob", date, 10); len(recs) != 1 {
+		t.Fatalf("bob 不应被牵连: %+v", recs)
+	}
+
+	// 整天
+	n, err = r.Delete(date, "", "")
+	if err != nil || n != 1 {
+		t.Fatalf("整天删 n=%d err=%v", n, err)
+	}
+	if days := r.Days(""); len(days) != 0 {
+		t.Fatalf("整天删后仍有日期: %v", days)
+	}
+
+	// 清空：先补两天再全删
+	r.SetEnabled(true)
+	r.Append(Record{ID: "x", Time: now, Key: "carol", Status: 200})
+	r.Stop()
+	if files, err := r.Purge(); err != nil || files == 0 {
+		t.Fatalf("purge files=%d err=%v", files, err)
+	}
+	if days := r.Days(""); len(days) != 0 {
+		t.Fatalf("purge 后仍有归档: %v", days)
+	}
+	// 不存在的日期：不报错，返回 0
+	if n, err := r.Delete("2000-01-01", "", ""); err != nil || n != 0 {
+		t.Fatalf("空日期删除 n=%d err=%v", n, err)
+	}
+	// 非法日期要拒绝
+	if _, err := r.Delete("2026/10/26", "", ""); err == nil {
+		t.Fatal("非法日期应报错")
+	}
+}
+
 func TestExtractUsage(t *testing.T) {
 	// 非流式：顶层 usage。
 	p, c := ExtractUsage(jsonRaw(`{"usage":{"prompt_tokens":35,"completion_tokens":43}}`), false)
