@@ -270,7 +270,7 @@ mkdir -p auths data && cp config.example.json config.json
 docker run -d --name workbuddy2api \
   -p 7863:7863 -e TZ=Asia/Shanghai \
   -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
-  ghcr.io/linguo2625469/workbuddy2api-panel:latest
+  ghcr.io/zhangchang1101728133/wb2api-panel:latest
 
 # 3. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
@@ -286,7 +286,7 @@ curl -s http://localhost:7863/healthz
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
+git clone https://github.com/zhangchang1101728133/wb2api-panel.git
 cd workbuddy2api-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
@@ -310,6 +310,47 @@ docker compose logs -f          # 跟踪日志
 docker compose restart          # 重启
 docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
 ```
+
+#### 反向代理与容器加固
+
+默认编排**只把 7863 绑到 `127.0.0.1`**，公网无法直连。生产部署建议在外面套一层 HTTPS 反向代理：
+
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name api.example.com;
+
+    ssl_certificate     /path/fullchain.pem;
+    ssl_certificate_key /path/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:7863;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # 流式（SSE）必须关掉缓冲，否则前端要等整段生成完才显示
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+`proxy_buffering off` 是关键：本网关的对话默认走 SSE 流式返回，开缓冲会让客户端「卡住不动直到生成结束」。
+
+容器侧已经内置的加固项：
+
+| 配置 | 作用 |
+|---|---|
+| `ports: 127.0.0.1:7863:7863` | 只绑回环，公网不可直连（`BIND_ADDR=0.0.0.0` 可覆盖） |
+| `read_only: true` | 根文件系统只读，写操作仅限挂载的 `auths/`、`data/`、`config.json` 与 `/tmp` |
+| `cap_drop: ALL` | 丢弃全部 Linux capabilities（只监听高位端口，无需特权） |
+| `no-new-privileges` | 禁止通过 setuid/setgid 提权 |
+| `pids_limit` / `mem_limit` | 限制进程数与内存，防止打爆宿主机 |
+
+> 升级后若出现 `read-only file system` 报错，说明程序开始往新路径写文件，把该路径加进 `volumes` 即可，不必整体关掉 `read_only`。
 
 ### 方式二：Windows 单文件运行（无需 Docker）
 

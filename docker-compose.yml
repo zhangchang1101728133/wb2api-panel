@@ -1,25 +1,52 @@
 services:
   wb2api:
     build: .
+    image: wb2api-panel:latest
     container_name: workbuddy2api
     restart: unless-stopped
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
-    # 「写入 auths/*.json.tmp 失败 permission denied」，三种解法任选：
-    #   1) 非 root · 让容器以你自己的 uid 运行（挂载目录本来就是你建的）：
+    # 「写 auths/*.json.tmp 失败 permission denied」，三种解法任选：
+    #   1) 以 root · 让容器以你自己的 uid 运行（挂载目录本来就是你建的）：
     #      PUID=$(id -u) PGID=$(id -g) docker compose up -d
-    #      或写进 .env 文件：PUID=1000 / PGID=1000
+    #      或写入 .env 文件：PUID=1000 / PGID=1000
     #   2) sudo chown -R 10001:10001 ./auths ./data ./config.json
     #   3) user: "0:0" 以 root 运行（省事但容器逃逸面更大，自担）
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
       - TZ=Asia/Shanghai
+    # 默认只监听回环地址，由宿主机上的反向代理（nginx / Caddy / 1Panel 等）
+    # 转发进来，避免 7863 直接暴露公网。反向代理的 upstream 写
+    # http://127.0.0.1:7863 即可。
+    # 确实需要内网直连时再放开：BIND_ADDR=0.0.0.0 docker compose up -d
     ports:
-      - "7863:7863"
+      - "${BIND_ADDR:-127.0.0.1}:7863:7863"
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data
-      # 注意：宿主机必须先有 config.json（cp config.example.json config.json）。
-      # 缺失时 Docker 会把挂载点创建成目录 → 容器启动失败（程序会自动生成配置，
-      # 但前提是它能以文件形式写入 —— 挂载目录会挡住这条路径）。
+      # 注意：宿主机必须先有 config.json（cp config.example.json config.json），
+      # 缺失时 Docker 会把挂载点创建成目录 → 容器启动失败（程序本可自动生成配置，
+      # 但挂载目录会挡住这条路径）。
       # 不挂 :ro：面板「配置」页需要写回此文件（保存后热生效）。
       - ./config.json:/app/config.json
+      # 只有配置里填了 upstream.device_token_file 时才需要这一行；
+      # 宿主机文件不存在时请勿取消注释，否则 Docker 会建同名目录导致启动失败。
+      # - ./device_token.txt:/app/device_token.txt:ro
+    # ---------------- 容器加固 ----------------
+    # 禁止通过 setuid/setgid 提权
+    security_opt:
+      - no-new-privileges:true
+    # 只监听高位端口，不需要任何 Linux capability
+    cap_drop:
+      - ALL
+    # 根文件系统只读：可写区域仅限上面挂载的 ./auths、./data、./config.json 与 /tmp
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    # 限制进程数与内存，防 fork 炸弹与内存打爆宿主机（常驻约 25MB）
+    pids_limit: 256
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
