@@ -10,16 +10,27 @@ import (
 )
 
 // contentDays 返回有归档的日期（可按密钥过滤），供前端下拉。
+//
+// 全局开关关闭时不再回 501：历史文件还在，前端要能区分「没开」和「没有记录」，
+// 所以统一 200 + enabled 标志，由界面决定提示文案。
 func (p *Panel) contentDays(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.ContentLog == nil || !p.cfg.ContentLog.Enabled() {
-		writeErr(w, http.StatusNotImplemented, "content archive disabled")
-		return
-	}
+	rec := p.cfg.ContentLog
+	enabled := rec != nil && rec.Enabled()
 	key := r.URL.Query().Get("key")
+	days := []string{}
+	keep := 0
+	if rec != nil {
+		days = rec.Days(key)
+		keep = rec.KeepDays()
+	}
+	if days == nil {
+		days = []string{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":        true,
-		"days":      p.cfg.ContentLog.Days(key),
-		"keep_days": p.cfg.ContentLog.KeepDays(),
+		"enabled":   enabled,
+		"days":      days,
+		"keep_days": keep,
 	})
 }
 
@@ -28,19 +39,25 @@ func (p *Panel) contentDays(w http.ResponseWriter, r *http.Request) {
 // 参数：key（空 = 全部）、date（空 = 今天）、limit（默认 50，上限 200）。
 // 返回按时间正序，取最近 limit 条。
 func (p *Panel) contentList(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.ContentLog == nil || !p.cfg.ContentLog.Enabled() {
-		writeErr(w, http.StatusNotImplemented, "content archive disabled")
+	rec := p.cfg.ContentLog
+	if rec == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"enabled": false,
+			"records": []any{},
+		})
 		return
 	}
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	recs, err := p.cfg.ContentLog.Query(q.Get("key"), q.Get("date"), limit)
+	recs, err := rec.Query(q.Get("key"), q.Get("date"), limit)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
+		"enabled": rec.Enabled(),
 		"records": recs,
 	})
 }

@@ -61,6 +61,48 @@ func extractStreamText(raw []byte) string {
 	return b.String()
 }
 
+// ExtractUsage 从响应体里抽 token 用量。
+//
+// 归档发生在请求收尾，reqlog 事件里的 token 数可能还没回填；而响应体本身
+// 一定带着 usage（非流式在顶层，流式在最后一帧）。这里当兜底来源，面板上
+// 才能看到「这条对话花了多少」。
+func ExtractUsage(raw []byte, stream bool) (prompt, completion int64) {
+	if len(raw) == 0 {
+		return 0, 0
+	}
+	type usage struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+	}
+	if !stream {
+		var resp struct {
+			Usage *usage `json:"usage"`
+		}
+		if json.Unmarshal(raw, &resp) == nil && resp.Usage != nil {
+			return resp.Usage.PromptTokens, resp.Usage.CompletionTokens
+		}
+		return 0, 0
+	}
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		var frame struct {
+			Usage *usage `json:"usage"`
+		}
+		if json.Unmarshal(payload, &frame) == nil && frame.Usage != nil &&
+			(frame.Usage.PromptTokens > 0 || frame.Usage.CompletionTokens > 0) {
+			prompt, completion = frame.Usage.PromptTokens, frame.Usage.CompletionTokens
+		}
+	}
+	return prompt, completion
+}
+
 // contentText 把 content 字段（字符串 / 文本块数组）摊平成纯文本。
 func contentText(raw json.RawMessage) string {
 	if len(raw) == 0 {

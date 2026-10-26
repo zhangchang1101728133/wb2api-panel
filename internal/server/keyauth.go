@@ -115,20 +115,8 @@ func (h *Handler) userStatus(w http.ResponseWriter, caller apikey.Entry) {
 		rpmUsed = h.cfg.KeyUsage.RPMUsed(caller.ID, now)
 	}
 
-	// 积分只统计该密钥能用的号（Allow 为空 = 全池）。
-	accounts, available := 0, 0
-	var credits, creditsTotal int64
-	for _, s := range h.cfg.Pool.List() {
-		if !callerAllows(caller, s.UID) {
-			continue
-		}
-		accounts++
-		if !s.Disabled && !s.Paused && !s.Cooling {
-			available++
-		}
-		credits += s.Credits
-		creditsTotal += s.CreditsTotal
-	}
+	// 积分只统计该密钥能用的号（Allow 为空 = 全池；min_credit 以下的号永远选不中）。
+	credits, creditsTotal, accounts, available := h.callerCredits(caller)
 
 	scope := "all"
 	if len(caller.Allow) > 0 {

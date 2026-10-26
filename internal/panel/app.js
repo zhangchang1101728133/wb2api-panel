@@ -3446,6 +3446,7 @@ applyExpFold();
 let keyRows = [];
 let keyEditId = null;
 let keyAccounts = [];        // 账号候选（含积分，来自 /panel/api/keys）
+let keyArchiveOn = true;     // 全局对话归档开关（密钥上的 content_log 只是允许）
 let keyModelCatalog = null;  // 模型目录缓存：/panel/api/models 直连上游，一次会话只拉一次
 let keyModelSelected = new Set();
 let keyModelCustom = [];
@@ -3488,6 +3489,7 @@ async function loadKeys() {
     const d = await api('keys');
     keyRows = d.keys || [];
     keyAccounts = d.accounts || [];
+    keyArchiveOn = d.content_archive !== false;
     fillKeyPinOptions();
     renderKeys();
     $('keysNote').textContent = keyRows.length ? keyRows.length + ' 个密钥' : '还没有分发密钥';
@@ -3695,6 +3697,9 @@ async function openKeyEditor(k) {
   $('keyNote').value = k ? (k.note || '') : '';
   $('keyEnabled').checked = k ? !!k.enabled : true;
   $('keyContentLog').checked = k ? !!k.content_log : false;
+  // 全局归档关着的时候，勾了也不会落盘：置灰 + 明说去哪儿开，避免「勾了却看不到」。
+  $('keyContentLog').disabled = !keyArchiveOn;
+  $('keyContentLogHint').hidden = keyArchiveOn;
   $('keyModelSearch').value = '';
   $('keyModelCustom').value = '';
   openVeil('keyVeil');
@@ -3841,7 +3846,14 @@ async function loadContent() {
     if (days.indexOf(prevD) >= 0) ds.value = prevD;
     if (!days.length) {
       ctRecords = [];
-      list.innerHTML = '<div class="empty"><div class="big">还没有归档</div>需要同时满足：配置里打开 logging.content_archive.enabled，且该密钥勾选「归档对话正文」</div>';
+      if (dd.enabled === false) {
+        list.innerHTML = '<div class="empty"><div class="big">对话归档未开启</div>' +
+          '去「配置 → 日志」打开「对话正文归档」，再给要归档的密钥勾上「归档对话正文」。' +
+          '保存后立即生效，不用重启；全局开关关着时，密钥上勾了也不会落盘。</div>';
+      } else {
+        list.innerHTML = '<div class="empty"><div class="big">还没有归档</div>' +
+          '全局开关已开，但没有记录：确认该密钥勾选了「归档对话正文」，并且之后确实有请求经过它。</div>';
+      }
       note.textContent = '—';
       return;
     }
@@ -3851,7 +3863,8 @@ async function loadContent() {
       (date ? '&date=' + encodeURIComponent(date) : ''));
     ctRecords = rd.records || [];
     renderContent();
-    note.textContent = ctRecords.length + ' 条 · 保留 ' + (dd.keep_days || '-') + ' 天';
+    note.textContent = ctRecords.length + ' 条 · 保留 ' + (dd.keep_days || '-') + ' 天' +
+      (dd.enabled === false ? ' · 归档已关闭（历史仍可查看）' : '');
   } catch (e) {
     list.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
   }
@@ -3880,7 +3893,9 @@ function renderContent() {
     const pre = 'white-space:pre-wrap;word-break:break-word;overflow:auto;background:var(--surface-2);padding:10px;border-radius:8px;margin:4px 0 0';
     const body =
       '<div style="display:grid;gap:10px;padding:6px 0 12px">' +
-      (r.text ? '<div><div class="lb">助手正文</div><pre style="' + pre + ';max-height:420px">' + esc(r.text) + '</pre></div>' : '') +
+      (r.text
+        ? '<div><div class="lb">助手正文</div><pre style="' + pre + ';max-height:420px">' + esc(r.text) + '</pre></div>'
+        : '<div class="hint" style="color:var(--ink-3)">本条没有可读正文（工具调用 / 仅推理型响应），展开「原始响应」看完整帧。</div>') +
       '<div><div class="lb">请求</div><pre style="' + pre + ';max-height:320px">' + esc(prettyJSON(r.request)) + '</pre></div>' +
       (r.response ? '<details><summary style="cursor:pointer;color:var(--ink-3)">原始响应</summary><pre style="' + pre + ';max-height:420px">' + esc(r.response) + '</pre></details>' : '') +
       '</div>';

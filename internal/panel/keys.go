@@ -140,10 +140,14 @@ func (p *Panel) keysList(w http.ResponseWriter, r *http.Request) {
 		row["last_active"] = st.LastActive
 		out = append(out, row)
 	}
+	// content_archive：全局归档开关。密钥上的 content_log 只是「允许归档」，
+	// 还得全局开；前端据此把勾选框置灰并给出提示，避免「勾了却看不到」。
+	contentArchive := p.cfg.ContentLog != nil && p.cfg.ContentLog.Enabled()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"keys":     out,
-		"accounts": p.accountChoices(),
+		"ok":               true,
+		"keys":             out,
+		"accounts":         p.accountChoices(),
+		"content_archive":  contentArchive,
 	})
 }
 

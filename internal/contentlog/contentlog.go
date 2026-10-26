@@ -2,7 +2,7 @@
 //
 // 与 reqlog 的分工：reqlog 只记脱敏元数据（谁、什么时候、用了多少 token），
 // 本包记正文（用户说了什么、模型回了什么）。正文远比元数据敏感，因此：
-//   - 全局开关 logging.content_archive.enabled 默认 false；
+//   - 全局开关 logging.content_archive.enabled 默认 false，可热开/关；
 //   - 每个密钥还要单独打开 content_log 才归档；
 //   - 默认只保留 7 天，启动时与每 6 小时清理过期文件。
 //
@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -52,14 +53,18 @@ type Record struct {
 }
 
 // Recorder 异步写入的归档器。dir 为空时整体禁用。
+//
+// 开关可热改（SetEnabled）：面板里打开/关闭「对话正文归档」立即生效，
+// 不必重启进程。关闭只停写入，历史文件仍可查询。
 type Recorder struct {
 	dir      string
-	keepDays int
-	ch       chan Record
-	stop     chan struct{}
-	done     chan struct{}
-	once     sync.Once
-	stopOnce sync.Once
+	keepDays atomic.Int64
+
+	mu      sync.RWMutex // 保护 ch/stop/done/enabled
+	ch      chan Record
+	stop    chan struct{}
+	done    chan struct{}
+	enabled bool
 }
 
 // New 创建归档器；keepDays <=0 按 7 天。
@@ -67,11 +72,20 @@ func New(dir string, keepDays int) *Recorder {
 	if keepDays <= 0 {
 		keepDays = 7
 	}
-	return &Recorder{dir: dir, keepDays: keepDays}
+	r := &Recorder{dir: dir}
+	r.keepDays.Store(int64(keepDays))
+	return r
 }
 
-// Enabled 是否已装配（dir 为空 = 禁用）。
-func (r *Recorder) Enabled() bool { return r != nil && r.dir != "" }
+// Enabled 是否正在归档（全局开关）。
+func (r *Recorder) Enabled() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.enabled && r.dir != ""
+}
 
 // Dir 归档目录（面板展示用）。
 func (r *Recorder) Dir() string {
@@ -86,44 +100,81 @@ func (r *Recorder) KeepDays() int {
 	if r == nil {
 		return 0
 	}
-	return r.keepDays
+	return int(r.keepDays.Load())
 }
 
-// Start 建目录、清理过期文件并启动写协程。
-func (r *Recorder) Start() {
-	if !r.Enabled() {
+// SetKeepDays 热改保留天数（下一次清理生效）。
+func (r *Recorder) SetKeepDays(d int) {
+	if r == nil || d <= 0 {
 		return
 	}
-	r.once.Do(func() {
+	r.keepDays.Store(int64(d))
+}
+
+// SetEnabled 热开/关归档。开启时建目录、清理过期文件并启动写协程；
+// 关闭时排空队列后退出。重复调用同一状态为空操作。
+func (r *Recorder) SetEnabled(on bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if on == r.enabled {
+		r.mu.Unlock()
+		return
+	}
+	if on {
+		if r.dir == "" {
+			r.mu.Unlock()
+			return
+		}
 		if err := os.MkdirAll(r.dir, 0o700); err != nil {
-			log.Printf("WARN: [contentlog] 创建归档目录失败（归档关闭）: %v", err)
-			r.dir = ""
+			log.Printf("WARN: [contentlog] 创建归档目录失败（归档保持关闭）: %v", err)
+			r.mu.Unlock()
 			return
 		}
 		r.ch = make(chan Record, queueSize)
 		r.stop = make(chan struct{})
 		r.done = make(chan struct{})
+		r.enabled = true
+		ch, stop, done := r.ch, r.stop, r.done
+		r.mu.Unlock()
 		r.prune()
-		go r.loop()
-		log.Printf("[contentlog] 对话正文归档已启用: %s（保留 %d 天，仅归档显式开启 content_log 的密钥）", r.dir, r.keepDays)
-	})
+		go r.loop(ch, stop, done)
+		log.Printf("[contentlog] 对话正文归档已启用: %s（保留 %d 天，仅归档显式开启 content_log 的密钥）", r.dir, r.KeepDays())
+		return
+	}
+	r.enabled = false
+	stop, done := r.stop, r.done
+	r.ch, r.stop, r.done = nil, nil, nil
+	r.mu.Unlock()
+	if stop != nil {
+		close(stop)
+		<-done
+	}
+	log.Printf("[contentlog] 对话正文归档已关闭（历史文件保留，可在面板继续查看）")
 }
 
-func (r *Recorder) loop() {
-	defer close(r.done)
+// Start 建目录、清理过期文件并启动写协程（启动期等价于 SetEnabled(true)）。
+func (r *Recorder) Start() { r.SetEnabled(true) }
+
+// Stop 停掉写协程（排空队列）。
+func (r *Recorder) Stop() { r.SetEnabled(false) }
+
+func (r *Recorder) loop(ch chan Record, stop, done chan struct{}) {
+	defer close(done)
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 	for {
 		select {
-		case rec := <-r.ch:
+		case rec := <-ch:
 			r.write(rec)
 		case <-ticker.C:
 			r.prune()
-		case <-r.stop:
+		case <-stop:
 			// 排空队列后退出，避免关停时丢最后几条。
 			for {
 				select {
-				case rec := <-r.ch:
+				case rec := <-ch:
 					r.write(rec)
 				default:
 					return
@@ -133,27 +184,20 @@ func (r *Recorder) loop() {
 	}
 }
 
-// Stop 停掉写协程（排空队列）。
-func (r *Recorder) Stop() {
-	if !r.Enabled() {
-		return
-	}
-	r.stopOnce.Do(func() {
-		if r.stop != nil {
-			close(r.stop)
-			<-r.done
-		}
-	})
-}
-
 // Append 入队一条记录。队列满时丢弃并记日志——宁可丢归档，不能阻塞对话。
 func (r *Recorder) Append(rec Record) {
-	if !r.Enabled() || r.ch == nil {
+	if r == nil {
+		return
+	}
+	r.mu.RLock()
+	ch, on := r.ch, r.enabled
+	r.mu.RUnlock()
+	if !on || ch == nil {
 		return
 	}
 	rec.truncate()
 	select {
-	case r.ch <- rec:
+	case ch <- rec:
 	default:
 		log.Printf("WARN: [contentlog] 归档队列已满，丢弃一条记录 id=%s", rec.ID)
 	}
@@ -196,7 +240,8 @@ func (r *Recorder) write(rec Record) {
 
 // prune 删除超过保留期的日文件。
 func (r *Recorder) prune() {
-	cutoff := time.Now().In(cst).AddDate(0, 0, -r.keepDays).Format("2006-01-02")
+	keep := r.KeepDays()
+	cutoff := time.Now().In(cst).AddDate(0, 0, -keep).Format("2006-01-02")
 	entries, err := os.ReadDir(r.dir)
 	if err != nil {
 		return
@@ -212,15 +257,17 @@ func (r *Recorder) prune() {
 		}
 		if date < cutoff { // 日期串字典序即时间序
 			if err := os.Remove(filepath.Join(r.dir, name)); err == nil {
-				log.Printf("[contentlog] 已清理过期归档 %s（保留 %d 天）", name, r.keepDays)
+				log.Printf("[contentlog] 已清理过期归档 %s（保留 %d 天）", name, keep)
 			}
 		}
 	}
 }
 
 // Days 返回有归档的日期（新→旧），只列该密钥真的出现过的天。
+//
+// 不要求全局开关处于打开状态：关掉归档后历史文件仍在，应该还能翻。
 func (r *Recorder) Days(key string) []string {
-	if !r.Enabled() {
+	if r == nil || r.dir == "" {
 		return nil
 	}
 	entries, err := os.ReadDir(r.dir)
@@ -266,9 +313,11 @@ func (r *Recorder) fileHasKey(path, key string) bool {
 
 // Query 返回某天（date 为空 = 今天）该密钥的记录，按时间正序。
 // key 为空 = 全部密钥。limit<=0 默认 50，上限 200（取最近的 limit 条）。
+//
+// 与 Days 同理：全局开关关掉后历史仍可读，只有写入会被拦。
 func (r *Recorder) Query(key, date string, limit int) ([]Record, error) {
-	if !r.Enabled() {
-		return nil, fmt.Errorf("content archive disabled")
+	if r == nil || r.dir == "" {
+		return nil, fmt.Errorf("content archive unavailable")
 	}
 	if date == "" {
 		date = time.Now().In(cst).Format("2006-01-02")

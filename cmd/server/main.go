@@ -38,7 +38,7 @@ import (
 // 用 var 而非 const，便于编译期注入：
 //
 //	go build -ldflags "-X main.appVersion=1.14.1-panel" ./cmd/server
-var appVersion = "1.14.3-panel"
+var appVersion = "1.14.4-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -288,18 +288,14 @@ func main() {
 
 	// 对话正文归档：默认关闭。打开后也只归档显式 content_log=true 的密钥流量，
 	// 因此「全局开 + 某个朋友单独开」才真正落盘。目录随 state_file 搬移。
-	var contentLog *contentlog.Recorder
-	if cfg.Logging.ContentArchive.Enabled {
-		dir := cfg.Logging.ContentArchive.Dir
-		if dir == "" {
-			dir = stateSibling(cfg.StateFile, "content-archive")
-		}
-		contentLog = contentlog.New(dir, cfg.Logging.ContentArchive.KeepDays)
-		contentLog.Start()
-		defer contentLog.Stop()
-	} else {
-		log.Printf("[contentlog] 对话正文归档未开启（logging.content_archive.enabled=false）")
+	// 记录器始终装配，开关走 SetEnabled：面板里改完立即生效，不必重启。
+	contentDir := cfg.Logging.ContentArchive.Dir
+	if contentDir == "" {
+		contentDir = stateSibling(cfg.StateFile, "content-archive")
 	}
+	contentLog := contentlog.New(contentDir, cfg.Logging.ContentArchive.KeepDays)
+	contentLog.SetEnabled(cfg.Logging.ContentArchive.Enabled)
+	defer contentLog.Stop()
 
 	// 请求指标始终启用；JSONL 归档只写脱敏元数据，写盘失败不影响聊天请求。
 	requestLog := reqlog.New(reqlog.Config{
@@ -347,7 +343,20 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			restart, err := saveConfig(raw, *cfgPath, live, p, up, sch)
+			if err != nil {
+				return restart, err
+			}
+			// 对话正文归档热生效：面板里勾上就立刻开始写，取消勾选就停写
+			// （历史文件仍可查）。归档目录是装配期捕获的，改目录只能重启。
+			if c, e := Load(*cfgPath); e == nil {
+				contentLog.SetEnabled(c.Logging.ContentArchive.Enabled)
+				contentLog.SetKeepDays(c.Logging.ContentArchive.KeepDays)
+				if d := c.Logging.ContentArchive.Dir; d != "" && d != contentLog.Dir() {
+					restart = append(restart, "logging.content_archive.dir")
+				}
+			}
+			return restart, nil
 		},
 		// 多密钥读写：与配置页共用同一条校验+落盘+热生效链路。
 		LoadKeys: func() ([]apikey.Key, error) {

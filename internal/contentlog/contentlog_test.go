@@ -117,4 +117,62 @@ func TestDisabledRecorder(t *testing.T) {
 	}
 }
 
+// 开关热改：打开后立即落盘，关闭后不再写，但历史文件仍可查。
+func TestHotToggle(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir, 7)
+	if r.Enabled() {
+		t.Fatal("新建的归档器默认关闭")
+	}
+	now := time.Now().In(cst)
+	r.Append(Record{ID: "dropped", Time: now, Key: "alice"}) // 关闭态：丢弃
+
+	r.SetEnabled(true)
+	if !r.Enabled() {
+		t.Fatal("SetEnabled(true) 后应为开启")
+	}
+	r.Append(Record{ID: "r1", Time: now, Key: "alice"})
+	r.SetEnabled(false)
+	if r.Enabled() {
+		t.Fatal("SetEnabled(false) 后应为关闭")
+	}
+	r.Append(Record{ID: "r2", Time: now, Key: "alice"}) // 关闭态：丢弃
+
+	date := now.Format("2006-01-02")
+	recs, err := r.Query("alice", date, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 || recs[0].ID != "r1" {
+		t.Fatalf("只应留下开启期间的 r1，实际 %+v", recs)
+	}
+	// 关掉写入不影响回看历史。
+	if days := r.Days("alice"); len(days) != 1 || days[0] != date {
+		t.Fatalf("days=%v", days)
+	}
+	// 重复开关不出错。
+	r.SetEnabled(true)
+	r.SetEnabled(true)
+	r.Stop()
+}
+
 func jsonRaw(s string) []byte { return []byte(s) }
+
+func TestExtractUsage(t *testing.T) {
+	// 非流式：顶层 usage。
+	p, c := ExtractUsage(jsonRaw(`{"usage":{"prompt_tokens":35,"completion_tokens":43}}`), false)
+	if p != 35 || c != 43 {
+		t.Fatalf("非流式 usage = %d/%d", p, c)
+	}
+	// 流式：usage 在最后一帧，前面的帧是 null。
+	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20}}\n\n" +
+		"data: [DONE]\n\n"
+	p, c = ExtractUsage([]byte(sse), true)
+	if p != 100 || c != 20 {
+		t.Fatalf("流式 usage = %d/%d", p, c)
+	}
+	if p, c := ExtractUsage(jsonRaw(`{"choices":[]}`), false); p != 0 || c != 0 {
+		t.Fatalf("无 usage 应返回 0/0，实际 %d/%d", p, c)
+	}
+}

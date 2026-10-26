@@ -162,6 +162,11 @@ func NewHandler(cfg Config) *Handler {
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	// 额度查询：任何密钥都能调（含管理密钥），返回按该密钥权限算出的剩余积分。
+	// /v1/usage 是同一份数据的别名，对齐 CC Switch 内置 Sub2API 模板的固定路径，
+	// 这样不写自定义脚本也能直接用内置模板查额度。
+	h.mux.HandleFunc("GET /v1/quota", h.withStatus(h.quota))
+	h.mux.HandleFunc("GET /v1/usage", h.withStatus(h.quota))
 	h.mux.HandleFunc("GET /status", h.withStatus(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
@@ -241,6 +246,13 @@ func (h *Handler) archiveContent(trace *requestTrace, e reqlog.Event, status int
 		req = json.RawMessage(strconv.Quote(string(trace.reqBody)))
 	}
 	raw := obs.buf.Bytes()
+	// token 数优先取 reqlog 事件；收尾时还没回填就从响应体 usage 里兜底。
+	prompt, complete := e.PromptTokens, e.CompletionTokens
+	if prompt == 0 && complete == 0 {
+		if p, c := contentlog.ExtractUsage(raw, trace.chatStream); p > 0 || c > 0 {
+			prompt, complete = p, c
+		}
+	}
 	h.cfg.ContentLog.Append(contentlog.Record{
 		ID:        e.RequestID,
 		Time:      trace.start,
@@ -249,8 +261,8 @@ func (h *Handler) archiveContent(trace *requestTrace, e reqlog.Event, status int
 		Account:   e.Account,
 		Status:    status,
 		Stream:    trace.chatStream,
-		Prompt:    e.PromptTokens,
-		Complete:  e.CompletionTokens,
+		Prompt:    prompt,
+		Complete:  complete,
 		Request:   req,
 		Response:  string(raw),
 		Text:      contentlog.ExtractText(raw, trace.chatStream),
@@ -300,7 +312,7 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		// 这里不构成信息泄露。
 		if live.Keys.Len() > 0 && (live.APIKey != "" || live.AdminKey != "") && live.IsAdmin(r) {
 			writeOpenAIError(w, http.StatusUnauthorized, "admin_key_not_allowed",
-				"管理密钥只能用于 /status 与 /panel，调用 /v1/* 请使用分发的用户密钥")
+				"管理密钥只能用于 /status、/v1/quota 与 /panel，调用 /v1/* 推理接口请使用分发的用户密钥")
 			return
 		}
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")

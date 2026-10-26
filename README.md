@@ -765,9 +765,9 @@ baseURL 指向 `<网关>/v1/search`，即可零代码接入本网关的搜索能
 
 ### 鉴权边界
 
-- `api_key` 与 `panel.admin_key` 是**管理员**：`/status`（全池视图）与 `/panel/*`。
-- `api_keys[].key` 是**用户**：`/v1/*`（对话 / 模型列表 / 搜索）与 `/status`（自己的额度视图）。
-- **配置了 `api_keys` 之后，管理密钥不能再调 `/v1/*`**：否则管理员流量会混进密钥账本，「这张 key 是谁在用」就答不清。拿着管理密钥调 `/v1/*` 会得到 `401 admin_key_not_allowed`，提示换成用户密钥。
+- `api_key` 与 `panel.admin_key` 是**管理员**：`/status`（全池视图）、`/v1/quota`（全池积分）与 `/panel/*`。
+- `api_keys[].key` 是**用户**：`/v1/*`（对话 / 模型列表 / 搜索）与 `/status`、`/v1/quota`（自己的额度视图）。
+- **配置了 `api_keys` 之后，管理密钥不能再调 `/v1/*` 推理接口**：否则管理员流量会混进密钥账本，「这张 key 是谁在用」就答不清。拿着管理密钥调 `/v1/*` 会得到 `401 admin_key_not_allowed`，提示换成用户密钥。只读的 `/v1/quota`（`/v1/usage`）例外——它不产生任何调用记录，放行才能让同一个额度提取器对任何 key 都可用。
 - 未配置 `api_keys` 时保持单密钥语义：`api_key` 同时是网关密钥，升级不会断流。
 - 两个管理员密钥都为空且 `api_keys` 为空 = 不鉴权（只适合内网自用）。
 
@@ -800,6 +800,74 @@ curl -s https://your-host/status -H "Authorization: Bearer sk-xxxx"
 
 `daily_tokens_left = -1` 表示不限额。
 
+### 给客户端用：`GET /v1/quota`
+
+`/status` 是给人看的完整快照。要让第三方客户端（CC Switch、各类中转面板）在卡片上显示「还剩多少积分」，用 `/v1/quota`：
+
+```bash
+curl -s https://your-host/v1/quota -H "Authorization: Bearer sk-xxxx"
+```
+
+```json
+{
+  "service": "workbuddy2api",
+  "isValid": true,
+  "unit": "积分",
+  "remaining": 900,
+  "total": 1000,
+  "used": 100,
+  "planName": "Alice · 指定 2 个号",
+  "extra": "2 个号可用 · 今日 12345 tok",
+  "quota": { "limit": 1000, "used": 100, "remaining": 900,
+             "accounts": 2, "accounts_available": 2 },
+  "limits": { "rpm_used": 3, "rpm_limit": 30,
+              "daily_tokens_used": 12345, "daily_tokens_limit": 500000,
+              "daily_tokens_left": 487655 },
+  "key": { "id": "alice", "name": "Alice", "role": "user", "accounts_scope": "limited" },
+  "today": { "requests": 12, "tokens": 12345 }
+}
+```
+
+语义：
+
+- **任何密钥都能查**——用户密钥只看自己那份，管理密钥看全池；
+- `remaining` 是**按该密钥权限算出来的**：只累加「在允许集合内（`pin` / `accounts`，都不设则全池）且积分达到 `min_credit` 且未被禁用」的账号积分。选号永远不会命中的号不计入，避免显示一个用不掉的数字；
+- 不返回账号 uid、昵称、冷却原因；
+- `/v1/usage` 是同一份数据的别名，路径对齐 CC Switch 内置的 **Sub2API** 模板，因此不写脚本也能用：供应商 → 配置用量查询 → 选「Sub2API」→ Base URL 填本站地址即可。
+
+#### CC Switch 自定义提取器
+
+内置模板不适用时，用自定义脚本（`{{baseUrl}}` 结尾带不带 `/v1` 都行）：
+
+```js
+({
+  request: {
+    url: "{{baseUrl}}".replace(/\/+$/, "").replace(/\/v1$/, "") + "/v1/quota",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "cc-switch/1.0"
+    }
+  },
+  extractor: function (response) {
+    if (!response || response.isValid === false) {
+      return { isValid: false, invalidMessage: "密钥无效或已停用" };
+    }
+    return {
+      isValid: true,
+      planName: response.planName,
+      remaining: response.remaining,
+      total: response.total,
+      used: response.used,
+      unit: response.unit || "积分",
+      extra: response.extra
+    };
+  }
+})
+```
+
+同一段脚本适用于所有密钥：换 key 只改客户端里的 API Key，额度自动按新 key 的权限重算。
+
 ### 选号三级回退
 
 1. `pin` 指定的账号；
@@ -821,6 +889,8 @@ curl -s https://your-host/status -H "Authorization: Bearer sk-xxxx"
 - `keyusage.json` 与 `usage.json` 并列：前者按「密钥 × 天」，后者按「账号 × 模型」，两条口径互不覆盖；保留 90 天，60 秒落盘一次。
 - 面板「密钥」页：新建 / 编辑 / 停用 / 轮换 / 清零 / 删除，列表显示今日请求、今日 token、累计 token、限额使用率、账号范围与最近使用时间。**明文只在新建或轮换的响应里出现一次**，之后只回显掩码。
 - 面板「对话归档」页：按密钥 + 日期回看完整请求体、助手正文与原始响应。需要 `logging.content_archive.enabled` 与该密钥 `content_log` 同时打开，默认保留 7 天；流式回答会把 `delta` 拼成整段正文，同时保留原始 SSE 备查。
+  - 两道闸是**与**关系：全局关着时，密钥上勾了 `content_log` 也不会落盘。面板会把这个状态直接标出来（勾选框置灰 + 提示去哪儿开），避免「勾了却看不到」。
+  - 改完配置**立即生效**，不用重启；关掉归档只是停止写入，历史文件仍可回看，到期自动清理。
 
 ## 🖥️ Web 管理面板
 
@@ -873,8 +943,9 @@ http://127.0.0.1:7863/panel/
 来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
 
 **配置热生效**：保存配置后，`api_key`、`panel.admin_key`、`api_keys`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
-`models.hidden`、`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
-涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`、`logging.content_archive.*`）
+`models.hidden`、`logging.request_client_info`、`logging.content_archive.enabled` / `keep_days`、`pool.*`（熔断/在途/权重）、
+`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
+涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`、`logging.content_archive.dir`）
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。
 
@@ -908,6 +979,7 @@ http://127.0.0.1:7863/panel/
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
+| `GET /v1/quota` | Bearer（任何密钥） | 按调用者密钥权限算出的剩余积分与限额，供第三方客户端展示额度；`/v1/usage` 为同数据别名（对齐 CC Switch 内置 Sub2API 模板） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
