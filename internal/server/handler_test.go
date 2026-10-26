@@ -971,6 +971,29 @@ func TestChatModelForbiddenByAccountTypeReturns400(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
+	// 预置 CN 目录缓存，避免打真实上游：GitHub runner 到 copilot.tencent.com 常
+	// TLS 握手超时，而该端点有 5 分钟负缓存，一旦超时整条 /v1/models 就只剩 global
+	// 模型——测试会以「models count=0 / cn:glm-5.2 missing」随机失败，把发布流水线
+	// 拦在门外。真正的目录拉取（含负缓存）由 TestModelsDynamic / TestModelsFetch*
+	// 用假上游覆盖，本用例只验证静态目录与已缓存动态目录的合并渲染。
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.ids = []upstream.ModelInfo{
+		{ID: "glm-5.2", Name: "GLM-5.2"},
+		{ID: "glm-5.3", Name: "GLM-5.3"},
+		{ID: "deepseek-v4.1", Name: "DeepSeek V4.1"},
+		{ID: "kimi-k2", Name: "Kimi K2"},
+		{ID: "qwen-3.5", Name: "Qwen 3.5"},
+	}
+	dynamicModelsCache.fetched = time.Now()
+	dynamicModelsCache.lastFail = time.Time{}
+	dynamicModelsCache.Unlock()
+	t.Cleanup(func() {
+		dynamicModelsCache.Lock()
+		dynamicModelsCache.ids = nil
+		dynamicModelsCache.fetched = time.Time{}
+		dynamicModelsCache.lastFail = time.Time{}
+		dynamicModelsCache.Unlock()
+	})
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
