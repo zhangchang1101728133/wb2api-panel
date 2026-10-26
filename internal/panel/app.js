@@ -3540,7 +3540,13 @@ async function ensureKeyModelCatalog() {
   if (box) box.innerHTML = '<div class="pick-empty">正在向上游拉取模型目录…</div>';
   try {
     const d = await api('models');
-    keyModelCatalog = d.models || [];
+    // 按域分组（CN 在前）再按名字排：55 个模型平铺一列时，用户找不到自己那一个。
+    const rank = r => (r === 'cn' ? 0 : 1);
+    keyModelCatalog = (d.models || []).slice().sort((a, b) => {
+      const ra = rank(modelRealm(a.id)), rb = rank(modelRealm(b.id));
+      if (ra !== rb) return ra - rb;
+      return modelBare(a.id).localeCompare(modelBare(b.id));
+    });
   } catch (e) {
     keyModelCatalog = []; // 失败不缓存：下次打开弹窗重试
     if (box) box.innerHTML = '<div class="pick-empty">模型目录拉取失败：' + esc(e.message) + '</div>';
@@ -3560,12 +3566,25 @@ function renderKeyModelPick() {
   const q = ($('keyModelSearch').value || '').trim().toLowerCase();
   const rows = keyModelCatalog.filter(m =>
     !q || (m.id + ' ' + (m.name || '') + ' ' + (m.vendor || '')).toLowerCase().includes(q));
-  box.innerHTML = rows.length ? rows.map(m =>
-    '<label class="pick-item"><input type="checkbox" data-model="' + esc(m.id) + '"' +
+  if (!rows.length) {
+    box.innerHTML = '<div class="pick-empty">没有匹配的模型</div>';
+    renderKeyModelCustom();
+    return;
+  }
+  const html = [];
+  let lastRealm = '';
+  rows.forEach(m => {
+    const realm = modelRealm(m.id);
+    if (realm !== lastRealm) {
+      html.push('<div class="pick-group">' + esc(realm.toUpperCase()) + '</div>');
+      lastRealm = realm;
+    }
+    html.push('<label class="pick-item"><input type="checkbox" data-model="' + esc(m.id) + '"' +
       (keyModelSelected.has(m.id) ? ' checked' : '') + '>' +
       '<span class="nm">' + esc(modelBare(m.id)) + '</span>' +
-      '<span class="meta">' + esc(modelRealm(m.id)) + (m.credits ? ' · ' + esc(m.credits) : '') + '</span></label>'
-  ).join('') : '<div class="pick-empty">没有匹配的模型</div>';
+      '<span class="meta">' + (m.credits ? esc(m.credits) : '') + '</span></label>');
+  });
+  box.innerHTML = html.join('');
   renderKeyModelCustom();
 }
 

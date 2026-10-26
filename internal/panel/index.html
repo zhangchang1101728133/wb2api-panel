@@ -629,6 +629,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .pick-item .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pick-item .meta { margin-left: auto; color: var(--ink-3); font: 11px var(--mono); white-space: nowrap; }
   .pick-empty { padding: 16px; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+  .pick-group {
+    padding: 8px 8px 3px; font: 600 10.5px var(--mono); letter-spacing: .06em;
+    color: var(--ink-3); border-top: 1px solid var(--line-soft); margin-top: 2px;
+  }
+  .pick-group:first-child { border-top: none; margin-top: 0; padding-top: 4px; }
   .pick-tools { display: flex; gap: 8px; margin-bottom: 8px; }
   .pick-tools input { flex: 1; }
   .pick-custom { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
