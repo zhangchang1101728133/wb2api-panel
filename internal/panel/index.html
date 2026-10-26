@@ -1628,15 +1628,15 @@ details.fold[open] { padding-bottom: 14px; }
   </div>
 </div>
 
-<!-- 密钥 -->
-<div class="veil" id="keyVeil" data-lock="1">
+<!-- 密钥门（登录用；与「新建密钥」编辑器不是同一个弹层，id 必须唯一） -->
+<div class="veil" id="keyGate" data-lock="1">
   <div class="dlg" style="width:420px">
     <header>
       <h3>需要访问密钥</h3>
       <div class="hint">该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。</div>
     </header>
     <div class="body">
-      <form style="display:contents" onsubmit="return false"><input type="password" id="keyInput" placeholder="api_key" autocomplete="off"></form>
+      <input type="password" id="keyInput" placeholder="api_key" autocomplete="off">
       <div class="state err" id="keyErr" hidden style="margin-top:10px">密钥不正确，请重试。</div>
     </div>
     <footer>

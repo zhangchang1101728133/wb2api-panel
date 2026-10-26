@@ -329,7 +329,7 @@ function formatRate(rate) {
 }
 
 /* ── 密钥门 ───────────────────────────────────────────────────────── */
-function openKey() { $('keyVeil').classList.add('on'); setTimeout(() => $('keyInput').focus(), 60); }
+function openKey() { $('keyGate').classList.add('on'); setTimeout(() => $('keyInput').focus(), 60); }
 $('btnKey').onclick = async () => {
   const v = $('keyInput').value.trim();
   if (!v) return;
@@ -337,7 +337,7 @@ $('btnKey').onclick = async () => {
   try {
     await api('overview');
     $('keyErr').hidden = true;
-    $('keyVeil').classList.remove('on');
+    $('keyGate').classList.remove('on');
     start();
   } catch (e) { $('keyErr').hidden = false; }
 };
