@@ -100,11 +100,9 @@ func runVersionWatch(ctx context.Context, vw VersionWatch, up *upstream.Client, 
 	var problems []string
 	var notes []string
 
-	check := func(realm string, src verwatch.Source, curClient, curCLI, clientKey, cliKey string) {
-		if !src.Configured() {
-			return
-		}
-		text, err := verwatch.Fetch(ctx, src.URL, 20*time.Second)
+	check := func(realm string, src verwatch.Source, deflt string, curClient, curCLI, clientKey, cliKey string) {
+		url := src.Resolve(deflt)
+		text, err := verwatch.Fetch(ctx, url, 20*time.Second)
 		if err != nil {
 			problems = append(problems, realm+": 拉取失败 "+err.Error())
 			return
@@ -125,9 +123,9 @@ func runVersionWatch(ctx context.Context, vw VersionWatch, up *upstream.Client, 
 	}
 
 	check("cn", verwatch.Source{URL: vw.CNURL, ClientRegex: vw.CNClientRegex, CLRegex: vw.CNCliRegex},
-		cnClient, cnCLI, "client_version", "cli_version")
+		verwatch.ChangelogCN, cnClient, cnCLI, "client_version", "cli_version")
 	check("global", verwatch.Source{URL: vw.GlobalURL, ClientRegex: vw.GlobalClientRegex, CLRegex: vw.GlobalCliRegex},
-		intlClient, intlCLI, "intl_client_version", "intl_cli_version")
+		verwatch.ChangelogGlobal, intlClient, intlCLI, "intl_client_version", "intl_cli_version")
 
 	var changed []string
 	var err error

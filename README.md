@@ -411,7 +411,7 @@ curl -s http://localhost:7863/v1/search/messages \
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
 | `upstream.client_version` / `cli_version` | 空 | 国内版出站 UA 的客户端版本与 CLI 版本（空 = 内置默认）。面板可改，**保存即热生效**，不用重新编译 |
 | `upstream.intl_client_version` / `intl_cli_version` | 空 | 国际版（`workbuddy-ai` 平台段）的客户端与 CLI 版本。国际端点同样按 UA 校验客户端身份，与国内版**不通用** |
-| `upstream.version_watch.*` | `enabled: true` / `6h` | 版本巡检：配了 `cn_url` / `global_url` 就按周期拉取版本源、比当前新就自动写回配置并热生效。面板「配置 → 客户端版本」有「立即检查」按钮 |
+| `upstream.version_watch.*` | `enabled: true` / `6h` | 版本巡检：每 6 小时抓一次**官方更新日志**（`www.workbuddy.cn/docs/workbuddy/Changelog`、`www.workbuddy.ai/docs/zh/workbuddy/Changelog`），取页面里最大的版本号，比当前新就写回配置并热生效。`cn_url` / `global_url` 留空即用官方源；也可填任意 URL 或本地文件路径（如桌面客户端的 `product.json`）。面板「配置 → 客户端版本」有「立即检查」按钮。CLI 版本没有公开来源，仍按手工维护 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `models.hidden` | `[]` | 模型黑名单：不对外暴露的模型。裸名=两域都藏；`"cn:xxx"`/`"global:xxx"`=只藏该域。`GET /v1/models` 列表过滤 + `POST /v1/chat/completions` 点名拒绝（400 `model_unavailable`）。面板保存后热生效 |
 | `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |

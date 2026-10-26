@@ -1251,19 +1251,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             </div>
             <div class="grid2">
               <label class="fld"><span class="lb">国内版版本源</span>
-                <input name="vw_cn_url" placeholder="https://… 或 /path/product.json（留空 = 不自动检查）">
-                <span class="hint">从该文本里抓版本号；支持本地文件路径</span></label>
+                <input name="vw_cn_url" placeholder="留空 = 官方 Changelog（www.workbuddy.cn/docs/workbuddy/Changelog）">
+                <span class="hint">留空即用官方更新日志页；也可填任意 URL / 本地文件路径</span></label>
               <label class="fld"><span class="lb">国内版正则（可选）</span>
                 <input name="vw_cn_regex" placeholder="([0-9]+\.[0-9]+\.[0-9]+)">
-                <span class="hint">留空 = 取文本里第 1 个 x.y.z 当客户端版本、第 2 个当 CLI</span></label>
+                <span class="hint">留空 = 取页面里最大的版本号</span></label>
             </div>
             <div class="grid2">
               <label class="fld"><span class="lb">国际版版本源</span>
-                <input name="vw_global_url" placeholder="https://… 或 /path/product.json">
+                <input name="vw_global_url" placeholder="留空 = 官方 Changelog（www.workbuddy.ai/docs/zh/workbuddy/Changelog）">
                 <span class="hint">同上</span></label>
               <label class="fld"><span class="lb">国际版正则（可选）</span>
                 <input name="vw_global_regex" placeholder="([0-9]+\.[0-9]+\.[0-9]+)">
-                <span class="hint">留空 = 默认顺序</span></label>
+                <span class="hint">留空 = 取页面里最大的版本号</span></label>
             </div>
             <div class="hr"></div>
             <div class="grid2">

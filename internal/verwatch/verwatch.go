@@ -29,9 +29,24 @@ type Source struct {
 	// URL http(s) 地址，或本地文件路径（不含 scheme 即当文件）。
 	URL string
 	// ClientRegex / CLRegex 从文本里抓客户端版本与 CLI 版本的正则（取第一个分组）。
-	// 留空则用 DefaultVersionRe：第一个命中当客户端版本，第二个当 CLI 版本。
+	// 留空且无 ClientRegex 时：取全页最大的 x.y.z 作为客户端版本（Changelog 场景）；
+	// CLI 版本没有正则就不猜（官方文档页不列 CLI 版本）。
 	ClientRegex string
 	CLRegex     string
+}
+
+// 官方 Changelog：版本号来源（也是默认源）。
+const (
+	ChangelogCN     = "https://www.workbuddy.cn/docs/workbuddy/Changelog"
+	ChangelogGlobal = "https://www.workbuddy.ai/docs/zh/workbuddy/Changelog"
+)
+
+// Resolve 返回实际要拉的地址：显式配了就用配置的，没配就用官方 Changelog。
+func (s Source) Resolve(deflt string) string {
+	if u := strings.TrimSpace(s.URL); u != "" {
+		return u
+	}
+	return deflt
 }
 
 // Configured 是否配了版本源。
@@ -85,6 +100,9 @@ func Fetch(ctx context.Context, rawURL string, timeout time.Duration) (string, e
 }
 
 // Parse 从文本里解析版本号。两个正则都可留空。
+//
+// 留空时（Changelog 页面场景）取「全页最大的版本号」——文档页通常把最新版写在
+// 最上面，但导航/目录里也可能先出现旧版本，取最大值比取第一个稳。
 func Parse(text string, src Source) Result {
 	res := Result{Raw: clipText(text, 300)}
 	if src.ClientRegex != "" {
@@ -93,24 +111,22 @@ func Parse(text string, src Source) Result {
 	if src.CLRegex != "" {
 		res.CLI = firstMatch(text, src.CLRegex)
 	}
-	if res.Client != "" && res.CLI != "" {
-		return res
-	}
-	// 默认顺序：文本里第一条版本号当客户端版本，第二条当 CLI 版本。
-	// 只有一条时只更新客户端版本（CLI 保持现状）。
-	all := allMatches(text, DefaultVersionRe)
-	if res.Client == "" && len(all) > 0 {
-		res.Client = all[0]
-	}
-	if res.CLI == "" {
-		for _, v := range all {
-			if v != res.Client {
-				res.CLI = v
-				break
-			}
-		}
+	if src.ClientRegex == "" {
+		res.Client = MaxVersion(text)
 	}
 	return res
+}
+
+// MaxVersion 返回文本里最大的 x.y.z（找不到返回空串）。
+func MaxVersion(text string) string {
+	all := allMatches(text, DefaultVersionRe)
+	best := ""
+	for _, v := range all {
+		if best == "" || Newer(v, best) {
+			best = v
+		}
+	}
+	return best
 }
 
 // Newer a 是否比 b 新（按 x.y.z 数字段比较，忽略 -build 后缀）。

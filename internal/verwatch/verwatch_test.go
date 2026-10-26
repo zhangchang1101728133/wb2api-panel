@@ -6,14 +6,15 @@ import (
 	"testing"
 )
 
-func TestParseDefaultOrder(t *testing.T) {
-	text := `{"version":"5.9.1","cli":{"version":"2.170.0"},"name":"WorkBuddy"}`
+func TestParseMaxVersion(t *testing.T) {
+	// Changelog 形态：最新在上，但目录/导航里会先出现旧版本 —— 取最大值。
+	text := `<a href="#5-8-3">5.8.3</a> ... <h2>5.9.2 版本发布</h2> ... <h2>5.9.1</h2> 2.0.0`
 	r := Parse(text, Source{})
-	if r.Client != "5.9.1" {
-		t.Errorf("client=%q want 5.9.1", r.Client)
+	if r.Client != "5.9.2" {
+		t.Errorf("client=%q want 5.9.2（全页最大）", r.Client)
 	}
-	if r.CLI != "2.170.0" {
-		t.Errorf("cli=%q want 2.170.0", r.CLI)
+	if r.CLI != "" {
+		t.Errorf("没有 CLI 正则时不应猜 CLI，得到 %q", r.CLI)
 	}
 }
 
@@ -77,7 +78,16 @@ func TestFetchLocalFile(t *testing.T) {
 		t.Fatalf("fetch: %v", err)
 	}
 	r := Parse(text, Source{})
-	if r.Client != "5.9.9" || r.CLI != "2.170.0" {
+	if r.Client != "5.9.9" {
 		t.Fatalf("parse %+v", r)
+	}
+}
+
+func TestSourceResolve(t *testing.T) {
+	if got := (Source{}).Resolve(ChangelogCN); got != ChangelogCN {
+		t.Errorf("空 URL 应回落官方 Changelog，得到 %q", got)
+	}
+	if got := (Source{URL: "http://x/y"}).Resolve(ChangelogCN); got != "http://x/y" {
+		t.Errorf("显式 URL 应优先，得到 %q", got)
 	}
 }

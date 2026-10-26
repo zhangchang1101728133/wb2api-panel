@@ -30,8 +30,10 @@ type VersionWatch struct {
 	Interval string `json:"interval"`
 
 	// 版本源：URL 支持 http(s)，也支持本地文件（/path/to/product.json）。
-	// 正则从响应文本里抓版本号；留空则按「文档里第一个 x.y.z 是客户端版本、
-	// 第二个是 CLI 版本」的默认顺序取。
+	// **留空 = 用官方 Changelog 页面**（默认源，开箱即用）：
+	//   国内 https://www.workbuddy.cn/docs/workbuddy/Changelog
+	//   国际 https://www.workbuddy.ai/docs/zh/workbuddy/Changelog
+	// 正则留空则取全页最大的 x.y.z 当客户端版本；CLI 版本没有正则就不动。
 	CNURL         string `json:"cn_url"`
 	CNClientRegex string `json:"cn_client_regex"`
 	CNCliRegex    string `json:"cn_cli_regex"`
