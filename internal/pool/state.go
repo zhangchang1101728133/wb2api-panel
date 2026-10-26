@@ -421,10 +421,19 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 // 这是粘性能"换得动"的关键：绑定只记 uid，若只按账号级 healthy 校验，
 // 被模型级限额的号（账号整体仍健康）会被持续选中直到轮换次数耗尽。
 func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
+	return p.PickByUIDForModelFiltered(uid, model, PickFilter{})
+}
+
+// PickByUIDForModelFiltered 在 PickByUIDForModel 之上叠加调用方约束（多密钥的 pin 路径）。
+// 与普通选号同口径：积分门槛不过就返回 nil，由调用方决定是否回退。
+func (p *Pool) PickByUIDForModelFiltered(uid, model string, f PickFilter) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
+		return nil
+	}
+	if !f.permits(uid, e.credits) {
 		return nil
 	}
 	now := time.Now()

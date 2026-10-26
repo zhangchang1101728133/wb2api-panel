@@ -11,13 +11,16 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"sync"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/apikey"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/contentlog"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/keyusage"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -33,7 +36,10 @@ type Config struct {
 	Pool      *pool.Pool
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	AdminKey  string // 管理面专用密钥（panel.admin_key）；空 = 回退 APIKey
+	// Keys 多密钥表（api_keys）。nil/空 = 未启用多密钥，只有 APIKey 可用。
+	Keys      *apikey.Table
+	MaxRotate int // 单请求最多换号次数，默认 3
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -71,6 +77,14 @@ type Config struct {
 	// 且与 pool 的每账号累计器同源，两条口径不会漂移。
 	Usage *usage.Recorder
 
+	// KeyUsage 按调用方密钥的用量记录器（可选；nil = 不记录、也不做密钥限额）。
+	// 与 Usage 并列而不是合并：前者是「谁用的」，后者是「哪个号被用的」。
+	KeyUsage *keyusage.Recorder
+
+	// ContentLog 对话正文归档器（可选；nil = 不归档）。
+	// 是否真的归档还取决于 livecfg.ContentArchive 与该密钥的 content_log。
+	ContentLog *contentlog.Recorder
+
 	// RequestLog 请求指标与脱敏 JSONL 归档（可选；nil = 不记录）。
 	RequestLog *reqlog.Recorder
 
@@ -87,9 +101,12 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 	}
 	return livecfg.Snapshot{
 		APIKey:           h.cfg.APIKey,
+		AdminKey:         h.cfg.AdminKey,
+		Keys:             h.cfg.Keys,
 		SoftCooldown:     h.cfg.SoftCooldown,
 		RecordClientInfo: h.cfg.RecordClientInfo,
 		HiddenModels:     livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
+		ContentArchive:   h.cfg.ContentLog != nil && h.cfg.ContentLog.Enabled(),
 	}
 }
 
@@ -145,7 +162,7 @@ func NewHandler(cfg Config) *Handler {
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
-	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	h.mux.HandleFunc("GET /status", h.withAdmin(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
@@ -154,7 +171,9 @@ func NewHandler(cfg Config) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.RequestLog != nil && h.tracedRequest(r) {
+	// 正文归档依赖同一条 trace（请求体 / 模型 / 响应捕获都在它上面），因此只要
+	// 两者任一启用就要建 trace——不能因为「请求元数据归档关了」而静默丢掉正文。
+	if (h.cfg.RequestLog != nil || h.cfg.ContentLog != nil) && h.tracedRequest(r) {
 		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path}
 		if isSearchPath(r.URL.Path) {
 			// 搜索不是模型调用，但面板「模型」列空着无法区分这类流量；
@@ -165,15 +184,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			trace.captureClientInfo(r)
 		}
 		r = r.WithContext(context.WithValue(r.Context(), requestTraceKey{}, trace))
-		obs := &responseObserver{ResponseWriter: w}
+		obs := &responseObserver{ResponseWriter: w, trace: trace}
 		w.Header().Set("X-Request-Id", trace.id)
-		h.cfg.RequestLog.Begin()
+		if h.cfg.RequestLog != nil {
+			h.cfg.RequestLog.Begin()
+		}
 		defer func() {
 			status := obs.status
 			if status == 0 {
 				status = http.StatusOK
 			}
-			h.cfg.RequestLog.Record(trace.event(status))
+			e := trace.event(status)
+			if h.cfg.RequestLog != nil {
+				h.cfg.RequestLog.Record(e)
+			}
+			h.archiveContent(trace, e, status, obs)
 		}()
 		h.mux.ServeHTTP(obs, r)
 		return
@@ -198,13 +223,83 @@ func isSearchPath(path string) bool {
 	return path == "/v1/search/messages"
 }
 
+// archiveContent 把本次对话正文交给归档器（未归档的请求是空操作）。
+//
+// 只有「全局归档开关 + 该密钥 content_log」同时成立时 trace.archive 才为真，
+// 因此这里不再重复判断密钥，只兜住装配缺失与禁用两种退化情况。
+func (h *Handler) archiveContent(trace *requestTrace, e reqlog.Event, status int, obs *responseObserver) {
+	if h.cfg.ContentLog == nil || !h.cfg.ContentLog.Enabled() || trace == nil || !trace.archive {
+		return
+	}
+	model := e.Model
+	if model == "" {
+		model = trace.chatModel
+	}
+	req := json.RawMessage(trace.reqBody)
+	if len(req) > 0 && !json.Valid(req) {
+		// 非 JSON 请求体（被 400 的畸形请求）也要能归档：转成 JSON 字符串。
+		req = json.RawMessage(strconv.Quote(string(trace.reqBody)))
+	}
+	raw := obs.buf.Bytes()
+	h.cfg.ContentLog.Append(contentlog.Record{
+		ID:        e.RequestID,
+		Time:      trace.start,
+		Key:       trace.key,
+		Model:     model,
+		Account:   e.Account,
+		Status:    status,
+		Stream:    trace.chatStream,
+		Prompt:    e.PromptTokens,
+		Complete:  e.CompletionTokens,
+		Request:   req,
+		Response:  string(raw),
+		Text:      contentlog.ExtractText(raw, trace.chatStream),
+		Truncated: obs.truncated,
+	})
+}
+
+// ctxKey 请求上下文里的调用方身份（多密钥）。
+type ctxKey struct{}
+
+// keyFrom 取出本次请求的调用方条目；未经 withAuth/withAdmin 时按管理员处理
+// （不鉴权部署的既有语义）。
+func keyFrom(ctx context.Context) apikey.Entry {
+	if v, ok := ctx.Value(ctxKey{}).(apikey.Entry); ok {
+		return v
+	}
+	return apikey.AdminEntry()
+}
+
+// withAuth 接受任意有效凭证：管理员密钥（api_key / panel.admin_key）或多密钥表里的
+// 启用条目。解析结果写入请求上下文，供选号约束与请求日志使用。
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+		live := h.loadLive()
+		if live.IsAdmin(r) {
+			next(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, apikey.AdminEntry())))
 			return
 		}
-		next(w, r)
+		if e, ok := live.Keys.Resolve(r); ok {
+			noteTraceKey(r, e.ID)
+			// 正文归档需要两道闸同时打开：全局开关 + 该密钥显式 content_log。
+			if live.ContentArchive && e.ContentLog {
+				noteTraceArchive(r)
+			}
+			next(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, e)))
+			return
+		}
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+	}
+}
+
+// withAdmin 仅管理员可访问：用户密钥不得读取全池状态（账号 uid / 昵称 / 积分分布）。
+func (h *Handler) withAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !h.loadLive().IsAdmin(r) {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "admin key required")
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, apikey.AdminEntry())))
 	}
 }
 
@@ -307,9 +402,14 @@ const (
 // models 返回模型列表：纯动态（缓存 10min），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	list := h.modelList()
+	// 多密钥模型白名单：用户密钥只看得到自己被允许的模型（不泄露全量目录）。
+	if caller := keyFrom(r.Context()); !caller.Admin && len(caller.Models) > 0 {
+		list = filterModelsForCaller(list, caller)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   list,
 	})
 }
 
@@ -581,6 +681,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel, realmExplicit := resolveModelDetail(peek.Model)
+	// 正文归档上下文（模型 / 是否流式 / 原始请求体）。未开启归档时只是几次赋值，
+	// 不复制 body——它本来就已整块读入内存，这里只多一个引用。
+	noteTraceChat(r, body, peek.Model, peek.Stream)
 	modelRate := ""
 	if h.cfg.Upstream != nil {
 		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
@@ -600,6 +703,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
 	}
 	defer st.done()
+
+	// 调用方密钥（多密钥）。管理员 / 单密钥部署拿到 AdminEntry，不受任何约束，
+	// 行为与引入多密钥前完全一致。
+	caller := keyFrom(r.Context())
+	if !callerAllowsModel(caller, realm, bareModel) {
+		writeOpenAIError(w, http.StatusBadRequest, "model_not_allowed",
+			"model is not allowed for this API key")
+		st.status = http.StatusBadRequest
+		st.outcome = reqlog.OutcomeHTTPError
+		return
+	}
+	// 密钥限额（RPM / 每日 token）。放在读 body 之后、选号之前：被限流的请求
+	// 不该消耗账号池名额，也不该触发上游调用。
+	if !h.enforceKeyLimits(w, caller, time.Now()) {
+		st.status = http.StatusTooManyRequests
+		st.outcome = reqlog.OutcomeHTTPError
+		return
+	}
 
 	// models.hidden 黑名单：点名调用直接拒绝，不打上游、不占选号。
 	// 与 /v1/models 的列表过滤对称（只藏列表不够，知道名字仍可硬调）。
@@ -621,6 +742,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := session.ExtractKey(body)
+	// 多密钥隔离：会话键加调用方前缀。不加的话，两个朋友用同一句开场白
+	// （system + 首条 user 哈希）会算出同一个会话键，粘性绑定直接串号。
+	if caller.ID != "" && sessKey != "" {
+		sessKey = "k:" + caller.ID + "|" + sessKey
+	}
 	stickyUID := ""
 	if h.cfg.Session != nil && sessKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
@@ -740,6 +866,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				HasTPS:           delta.HasTokensPerSecond,
 			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
 		}
+
+		// 按调用方密钥记账（与账号维度并行，互不覆盖）。管理员流量不记 key，
+		// 避免把「我自己的调用」混进朋友的统计里。
+		if h.cfg.KeyUsage != nil && caller.ID != "" {
+			h.cfg.KeyUsage.Add(time.Now(), caller.ID, delta.Model, keyusage.Delta{
+				PromptTokens:     delta.PromptTokens,
+				CompletionTokens: delta.CompletionTokens,
+				Credit:           credit,
+				HasCredit:        hasCredit,
+			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
+		}
 	}
 
 	// 系统提示词改写（出站前、轮转前；每个请求一次）。
@@ -803,10 +940,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
+	// 多密钥约束：pin（固定单号）→ 账号集合 → 全池回退（配置方选择的可用性优先）。
+	// Allow 为空表示不限；MinCredit>0 时只选积分达标的号。
+	callerFilter := pool.PickFilter{Allow: caller.Allow, MinCredit: caller.MinCredit}
+	// pickFiltered 保留既有 realm / 跨域回退语义，只把调用方约束透传下去。
+	pickFiltered := func(filter pool.PickFilter) *auth.Auth {
+		pickRealm := realm
+		if crossRealm && h.cfg.Pool.ServableForModelRealm(bareModel, realm) == 0 &&
+			h.cfg.Pool.ServableForModelRealm(bareModel, otherRealm(realm)) > 0 {
+			pickRealm = otherRealm(realm)
+		}
+		if acct := h.cfg.Pool.PickExcludingForRealmFiltered(tried, bareModel, pickRealm, filter); acct != nil {
+			return acct
+		}
+		if crossRealm {
+			return h.cfg.Pool.PickExcludingForRealmFiltered(tried, bareModel, otherRealm(pickRealm), filter)
+		}
+		return nil
+	}
+
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
-		if stickyUID != "" {
+		if stickyUID != "" && callerAllows(caller, stickyUID) {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
 			// 跨域回退开启且请求为裸名时，粘性号可以落在任一域（回退成功后绑定的是另一域
 			// 的账号，下一轮不该被 realm 校验立刻解绑）。
@@ -817,22 +973,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				acct = nil
 			}
 		}
+		// 密钥固定单号：只叠加积分门槛（pin 本身就是「就用这个号」的显式选择，
+		// 不再要求它出现在 accounts 里）。该号不可用时继续往下回退，不直接 503。
+		if acct == nil && caller.Pin != "" {
+			acct = h.cfg.Pool.PickByUIDForModelFiltered(caller.Pin, bareModel,
+				pool.PickFilter{MinCredit: caller.MinCredit})
+		}
 		if acct == nil {
-			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
-			// （healthyForModel），realm 谓词过滤跨域账号。
-			pickRealm := realm
-			if crossRealm && h.cfg.Pool.ServableForModelRealm(bareModel, realm) == 0 &&
-				h.cfg.Pool.ServableForModelRealm(bareModel, otherRealm(realm)) > 0 {
-				// 首选域此刻没有真正可服务的号（11102 模型级负缓存 / 账号级冷却 /
-				// 在途占满），而另一域有 → 直接换域选号（issue #135）。先看健康度再选，
-				// 避免拿全冷却兜底捞回来的旧域账号白撞一次上游。
-				pickRealm = otherRealm(realm)
-			}
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, pickRealm)
-			if acct == nil && crossRealm {
-				// 该域选不到（并发抢名额/轮换耗尽/另一域刚冷却完）→ 另一域再试一次，
-				// 保持尽力而为语义；tried 已记录失败号，轮转仍由 MaxRotate 封顶。
-				acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, otherRealm(pickRealm))
+			acct = pickFiltered(callerFilter)
+			// 限定集合里的号全不可用 → 回退全池（显式选择的可用性优先），
+			// 但必须留痕，否则「限定账号」会静默失效。
+			if acct == nil && len(caller.Allow) > 0 {
+				acct = pickFiltered(pool.PickFilter{MinCredit: caller.MinCredit})
+				if acct != nil {
+					log.Printf("WARN: [key] %s 限定账号全部不可用，已回退全池 acct=%s",
+						caller.ID, logfmt.Label(acct.UID, acct.Nickname))
+				}
 			}
 		}
 		if acct == nil {

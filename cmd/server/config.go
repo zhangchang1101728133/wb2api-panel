@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/apikey"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
@@ -29,7 +30,17 @@ type Config struct {
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
 		PackageDetailLimit int `json:"package_detail_limit"`
+		// AdminKey 管理面板专用密钥。空 = 回退 api_key（既有单密钥语义）。
+		// 与 api_key 分开的意义：api_key 仍然对 /v1/* 有效（老客户端零改动），
+		// 但把用户密钥发给朋友后，他们拿不到面板权限。
+		AdminKey string `json:"admin_key,omitempty"`
 	} `json:"panel"`
+
+	// APIKeys 多密钥（分发给他人使用的调用方密钥）。空 = 只有 api_key 可用，
+	// 行为与引入前完全一致。
+	APIKeys []apikey.Key `json:"api_keys,omitempty"`
+	// KeyTable 解析后的密钥表（normalize 构建，运行期只读）。
+	KeyTable *apikey.Table `json:"-"`
 
 	Logging struct {
 		// RequestArchiveEnabled 请求元数据 JSONL 归档开关，缺省 true。
@@ -46,6 +57,17 @@ type Config struct {
 		// 关掉。关闭后 Event.ClientIP/UserAgent 保持为空，归档里不出现该字段。
 		// 热生效（经 livecfg 快照），无需重启。
 		RequestClientInfo bool `json:"request_client_info"`
+
+		// ContentArchive 对话正文归档（多密钥「回看完整对话」的落地开关）。
+		// 默认关闭：正文比 token 计数敏感得多，默认落盘不可接受。
+		// 打开后仍只归档 api_keys 里显式 content_log=true 的密钥流量。
+		ContentArchive struct {
+			Enabled bool `json:"enabled"`
+			// Dir 归档目录；空 = state 文件同目录下的 content-archive。
+			Dir string `json:"dir,omitempty"`
+			// KeepDays 保留天数，缺省 7；<=0 回落默认。
+			KeepDays int `json:"keep_days"`
+		} `json:"content_archive"`
 	} `json:"logging"`
 
 	Server struct {
@@ -501,11 +523,25 @@ func (c *Config) normalize() error {
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
 	}
+	// 多密钥：构建即校验（id/key 唯一、不得与管理员密钥撞车）。管理密钥空值
+	// 回退 api_key，因此老配置（无 panel.admin_key / api_keys）行为零变化。
+	if c.Panel.AdminKey == "" {
+		c.Panel.AdminKey = c.APIKey
+	}
+	tbl, err := apikey.Build(c.APIKeys, c.APIKey, c.Panel.AdminKey)
+	if err != nil {
+		return err
+	}
+	c.KeyTable = tbl
 	if c.Logging.RequestRetentionDays <= 0 {
 		c.Logging.RequestRetentionDays = 7
 	}
 	if c.Logging.RequestArchiveMaxMB <= 0 {
 		c.Logging.RequestArchiveMaxMB = 100
+	}
+	// 对话正文归档：保留天数缺省 7；目录留空由 main 按 state 文件位置推出。
+	if c.Logging.ContentArchive.KeepDays <= 0 {
+		c.Logging.ContentArchive.KeepDays = 7
 	}
 	// 入站读取上限（issue #100）：空值回落默认 300s；"0" 合法（不限制）；
 	// 负值无语义，fail fast（静默钳 0 会把保护悄悄关掉）。

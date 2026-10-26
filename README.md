@@ -61,7 +61,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
-| 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题，七个视图）：账号运维 / 用量与积分分析 / 模型档位条件查询 / 在线改配置（热生效）/ 运行日志（含**调用来源 IP·UA** 与时间区间）/ 积分任务，见 [Web 管理面板](#-web-管理面板) |
+| 🔑 **多密钥分发** | 一人一 key：按密钥限定可用账号、积分门槛与模型白名单，独立 RPM / 每日 token 限额与用量统计；可选归档完整对话正文供回看 |
+| 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题，九个视图）：账号运维 / 用量与积分分析 / 密钥分发 / 对话归档 / 模型档位条件查询 / 在线改配置（热生效）/ 运行日志（含**调用来源 IP·UA** 与时间区间）/ 积分任务，见 [Web 管理面板](#-web-管理面板) |
 
 ## 🎯 成长任务一键完成（17/18）
 
@@ -377,7 +378,12 @@ curl -s http://localhost:7863/v1/search/messages \
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `listen` | `:7863` | HTTP 监听地址 |
-| `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
+| `api_key` | 空 | 网关鉴权密钥，同时也是管理员密钥；**空 = 不鉴权直接放行**（公网必须设置） |
+| `panel.admin_key` | 空 | 管理面专用密钥（`/panel/*` 与 `/status`）；空 = 回退 `api_key`。用户密钥永远进不了管理面 |
+| `api_keys` | `[]` | 多密钥表（一人一 key）：每项 `id` / `key` / `name` / `enabled` / `accounts` / `pin` / `min_credit` / `models` / `max_rpm` / `daily_tokens` / `content_log` / `note`。详见 [多密钥：一人一 Key](#多密钥一人一-key) |
+| `logging.content_archive.enabled` | `false` | 对话正文归档总开关；开启后仍只归档 `api_keys` 中 `content_log=true` 的密钥流量；改动需重启 |
+| `logging.content_archive.keep_days` | `7` | 正文归档保留天数；按天分文件，过期文件在启动与每 6 小时清理 |
+| `logging.content_archive.dir` | 空 | 归档目录；空 = `state_file` 同目录下 `content-archive/` |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `dns_servers` | 空 | **出站解析**用的 DNS 服务器（数组，按顺序试，都用不上才报错）；空 = 系统解析器。/etc/resolv.conf 不存在或不可用的环境（Android、精简容器）必须显式配，否则 Go 解析器会退回 `127.0.0.1:53`，查任何域名都变成"连本机 53 端口"（`dial tcp: lookup ... on [::1]:53: connection refused`）。只换 `Transport.DialContext`，不动超时与连接池 |
@@ -714,6 +720,79 @@ baseURL 指向 `<网关>/v1/search`，即可零代码接入本网关的搜索能
 
 **余额后台刷新**（`schedule.balance_refresh_enabled`，缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同签到，但不做签到不刷 token）。面板「立即刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。
 
+## 多密钥：一人一 Key
+
+一个网关可以同时服务多个人：每人一个密钥，各自的用量、限额与可用账号互不影响。
+
+### 配置
+
+```json
+{
+  "api_key": "sk-admin-...",
+  "panel": { "admin_key": "sk-panel-..." },
+  "api_keys": [
+    {
+      "id": "alice",
+      "name": "Alice",
+      "key": "sk-...",
+      "enabled": true,
+      "accounts": ["08e923f9-..."],
+      "pin": "",
+      "min_credit": 100,
+      "models": ["deepseek-*", "cn:glm-5.2"],
+      "max_rpm": 30,
+      "daily_tokens": 500000,
+      "content_log": false,
+      "note": "设计组"
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `id` | 稳定标识，统计与归档按它归类；创建后不可改 |
+| `key` | 密钥明文，`sk-` 前缀；面板只回显掩码 |
+| `name` / `note` | 展示名与备注，纯展示 |
+| `enabled` | `false` 立即失效（热生效）；JSON 里省略该字段视为 `true` |
+| `accounts` | 可用账号 uid 集合；空 = 全池 |
+| `pin` | 固定账号 uid，优先级最高；不可用时按 `accounts` → 全池回退 |
+| `min_credit` | 只选积分 ≥ 该值的账号（`0` = 不限） |
+| `models` | 模型白名单：裸名 = 两域都放行，`cn:` / `global:` 前缀只放行该域，支持 `*` 通配；空 = 不限 |
+| `max_rpm` | 每分钟请求上限（滑动 60s 窗口），`0` = 不限 |
+| `daily_tokens` | 每日 token 上限（UTC+8 零点重置），`0` = 不限 |
+| `content_log` | 是否归档该密钥的对话正文（还需全局开关，见下） |
+
+### 鉴权边界
+
+- `api_key` 与 `panel.admin_key` 是**管理员**：`/v1/*`、`/status`、`/panel/*` 全通。
+- `api_keys[].key` 是**用户**：只通 `/v1/*`；`/status` 与 `/panel/*` 一律 401——否则用户能看到全池账号 uid、积分与冷却原因。
+- 两个管理员密钥都为空且 `api_keys` 为空 = 不鉴权（只适合内网自用）。
+
+校验方式是遍历全部密钥做常量时间比较（命中后不提前 `break`），避免通过响应时间反推密钥前缀。
+
+### 选号三级回退
+
+1. `pin` 指定的账号；
+2. `accounts` 限定集合；
+3. 全池自动选（并打一条 `WARN` 日志，便于事后发现「限定号全挂了」）。
+
+`min_credit` 叠加在每一级之上；池级的积分保底（`pool.credit_floor`）照常生效，因此**只会用到有积分的账号**。
+
+会话粘性也按密钥隔离：同一密钥的同一会话优先落回上一次的账号，换密钥不会串号；粘性号不在该密钥的允许范围内时自动解绑重选。
+
+### 限额
+
+- `max_rpm`：滑动窗口，超限返回 `429` 与 `Retry-After`；
+- `daily_tokens`：**事后记账**——请求入口判「今日已用 ≥ 上限」就拦。所以单个请求可以略微越过上限（大 prompt 无法预知），但下一条立刻被拒。相比预扣，这不会因为 token 估算误差误伤正常请求；
+- 管理员流量不计入任何密钥额度。
+
+### 用量与归档
+
+- `keyusage.json` 与 `usage.json` 并列：前者按「密钥 × 天」，后者按「账号 × 模型」，两条口径互不覆盖；保留 90 天，60 秒落盘一次。
+- 面板「密钥」页：新建 / 编辑 / 停用 / 轮换 / 清零 / 删除，列表显示今日请求、今日 token、累计 token、限额使用率、账号范围与最近使用时间。**明文只在新建或轮换的响应里出现一次**，之后只回显掩码。
+- 面板「对话归档」页：按密钥 + 日期回看完整请求体、助手正文与原始响应。需要 `logging.content_archive.enabled` 与该密钥 `content_log` 同时打开，默认保留 7 天；流式回答会把 `delta` 拼成整段正文，同时保留原始 SSE 备查。
+
 ## 🖥️ Web 管理面板
 
 内嵌式管理面板（`internal/panel`，前端 go:embed 单文件打进二进制，无外部构建依赖），服务启动后访问：
@@ -723,16 +802,18 @@ http://127.0.0.1:7863/panel/
 ```
 
 鉴权与 API 同口径：`api_key` 非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则直接可用。
-界面支持**明暗主题切换**（首次跟随系统偏好，点击按钮两态翻转并记住选择），左侧导航七个视图：
+界面支持**明暗主题切换**（首次跟随系统偏好，点击按钮两态翻转并记住选择），左侧导航九个视图：
 
 | 视图 | 功能 |
 |---|---|
 | **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、积分量条、成功·失败计数、在途、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
 | **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
+| **密钥** | 一人一 key 的分发与治理：新建 / 编辑 / 停用 / 轮换 / 清零 / 删除；列表显示今日请求与失败数、今日 token（含日额度使用率）、累计 token、RPM 与日额度、账号范围（固定 / 限定 / 全池）、积分门槛与最近使用时间。明文只在新建或轮换时显示一次 |
+| **对话归档** | 按密钥 + 日期回看完整对话：请求体、拼好的助手正文、原始响应（流式为 SSE）可逐条展开；只显示 `content_log` 已开启且全局归档打开的密钥流量，默认保留 7 天 |
 | **积分构成** | **积分到期分布**（按批次到期日聚合，颜色区分账号）+ **账号对比**（按来源归并的面额 / 余额 / 包数卡片与混合构成条）+ 逐包明细（按到期日排序，默认展开最近到期的 `panel.package_detail_limit` 个，其余与已用完的包折叠） |
 | **任务中心** | 成长任务队列：一键扫描全部账号待办 → 按账号排队执行（账号内串行，账号间可选并发 1-3），进度实时更新；另含开学季券码查询。详见 [任务中心](#-任务中心面板新视图) |
 | **模型与档位** | 实时查询上游：每模型的积分倍率（含限时免费 / 夜间折扣等**生效价**与划线牌价）、默认思考档、支持的档位（含「off（可关）」）、上下文长度与最大输出；存在探测数据时最大输出列显示**实测上限与钳制告警**（见「探测模型真实输出上限」）。支持**按条件查询**：关键词（ID / 名称 / 描述 / 厂商 / 标签，空格分词 AND）、域（CN / Global）、能力（工具 / 视觉 / 思考 / 默认）、思考档位、价格（折扣 / 限时免费 / 打折），以及按倍率 / 上下文 / 最大输出 / ID 排序 |
-| **配置** | 在线编辑 config.json：服务（监听地址 / API 密钥 / 单账号明细条数）、定时任务（签到 / 保活 / 旅行 / 活跃 / 成长任务五类时点与开关 + 余额刷新间隔）、账号池与流量治理、上游与高级（超时 / 出站 UA / 提示词模式 / 指纹脱敏 / 粘性路由）、日志（调用来源记录开关） |
+| **配置** | 在线编辑 config.json：服务（监听地址 / API 密钥 / 单账号明细条数）、定时任务（签到 / 保活 / 旅行 / 活跃 / 成长任务五类时点与开关 + 余额刷新间隔）、账号池与流量治理、上游与高级（超时 / 出站 UA / 提示词模式 / 指纹脱敏 / 粘性路由）、日志（调用来源记录开关、对话正文归档开关与保留天数） |
 | **运行日志** | **请求记录表**（时间 / 结果 / 模型 / 账号 / **来源 IP** / **User-Agent** / 耗时 / Token / 积分 / 请求 ID），支持按 IP·UA·模型·账号·请求 ID 与结果筛选、读取条数、时间范围；下方 **运行日志** 按「任务 / 对话 / 系统」分频道，可开关自动滚动；新增 **积分历史**（每次真实查到余额与上次比对，变动即留痕） |
 
 顶部另有「刷新」（向上游全量查询真实余额并回写；5 秒自动轮询只读内存，不打上游）与「添加账号」（浏览器内完成 OAuth 设备授权：显示授权链接 + 自动轮询，登录后凭证落盘并**热加载进池，免重启**，也支持导入 cockpit tools 导出的 JSON）。
@@ -762,9 +843,9 @@ http://127.0.0.1:7863/panel/
 
 来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
 
-**配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
+**配置热生效**：保存配置后，`api_key`、`panel.admin_key`、`api_keys`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
 `models.hidden`、`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
-涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
+涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`、`logging.content_archive.*`）
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。
 
@@ -779,13 +860,15 @@ http://127.0.0.1:7863/panel/
 | 补偿 | `GET compensation`（逐号查补偿状态，**只读**）；`POST accounts/{uid}/compensation`（单号领）；`POST compensation_all`（全量领，返回 `summary{claimed,skipped,errored,credit}`——**先看 `errored` 再看 `claimed`**，否则会把「全部查询失败」说成「没有待领补偿」） |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
+| 密钥 | `GET keys`（含各密钥今日 / 累计用量与账号候选）· `POST keys`（新建，响应里返回一次明文）· `POST keys/{id}`（部分更新）· `POST keys/{id}/rotate` · `POST keys/{id}/reset`（清零用量）· `POST keys/{id}/delete` |
+| 对话归档 | `GET content/days?key=`（有归档的日期）· `GET content?key=&date=&limit=`（默认 50 条，上限 200） |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。
 
 **安全响应头**：面板页面与全部 `/panel/api/*` 响应统一带 `Content-Security-Policy`（`default-src 'none'`，脚本仅同源，`frame-ancestors 'none'` 禁嵌套）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等；前端脚本独立为同源 `app.js`，不含内联脚本与内联事件处理器。
 
-**鉴权实现**：`internal/httpauth` 统一 server 与 panel 的 Bearer 校验，使用 SHA-256 摘要 + `subtle.ConstantTimeCompare` 常量时间比较（避免逐字节比较泄露密钥信息）；上游返回的 `uid` 经白名单校验（`[A-Za-z0-9_-]`，长度 ≤64）后才用于拼凭证文件名，防止路径穿越。
+**鉴权实现**：管理员面（`api_key` / `panel.admin_key`）与用户密钥（`api_keys`）分两条路径。管理员密钥走 `internal/httpauth` 的 SHA-256 摘要 + `subtle.ConstantTimeCompare` 常量时间比较；用户密钥走 `internal/apikey` 的遍历式常量时间比较（命中后不提前返回），并携带该密钥的账号范围、模型白名单与限额。上游返回的 `uid` 经白名单校验（`[A-Za-z0-9_-]`，长度 ≤64）后才用于拼凭证文件名，防止路径穿越。
 
 > ⚠️ 公网部署提示：服务自身只提供明文 HTTP，**请务必置于 HTTPS 反向代理之后**（Nginx/Caddy 等）并配置访问限流；仅本机或私有网络使用时可直接运行。
 

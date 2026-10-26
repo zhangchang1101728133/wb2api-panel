@@ -350,7 +350,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', keys: '密钥', content: '对话归档', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -360,6 +360,8 @@ function go(v) {
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
+  if (v === 'keys') loadKeys();
+  if (v === 'content') loadContent();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
@@ -1155,6 +1157,8 @@ const CFG_MAP = {
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
+  content_archive_enabled: ['logging', 'content_archive', 'enabled'],
+  content_archive_keep_days: ['logging', 'content_archive', 'keep_days'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -3435,3 +3439,285 @@ if ($('btnExpFold')) {
   };
 }
 applyExpFold();
+
+/* ══ 密钥（一人一 key：各自用量 / 限额 / 可用账号）══════════════════════════
+   明文只在「新建 / 轮换」的响应里出现一次：面板其它地方一律回显掩码。
+   编辑复用同一张表单（keyEditId 为空 = 新建），避免维护两套字段。 */
+let keyRows = [];
+let keyEditId = null;
+
+function fmtNum(n) { return (Number(n) || 0).toLocaleString(); }
+function keyNum(v) { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0; }
+function shortUid(uid) { return !uid ? '' : (uid.length > 10 ? uid.slice(0, 10) + '…' : uid); }
+
+async function loadKeys() {
+  const tb = $('keysBody');
+  try {
+    const d = await api('keys');
+    keyRows = d.keys || [];
+    fillKeyAccountOptions(d.accounts || []);
+    renderKeys();
+    $('keysNote').textContent = keyRows.length ? keyRows.length + ' 个密钥' : '还没有分发密钥';
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="10"><div class="empty">' + esc(e.message) + '</div></td></tr>';
+  }
+}
+
+/* 账号候选：多选框与「固定账号」下拉共用同一份列表。重载时保留已选状态，
+   否则每次刷新都会把用户刚勾的账号清空。 */
+function fillKeyAccountOptions(accts) {
+  const sel = $('keyAccounts'), pin = $('keyPin');
+  if (!sel || !pin) return;
+  const prevSel = new Set([...sel.selectedOptions].map(o => o.value));
+  const prevPin = pin.value;
+  const opt = a => '<option value="' + esc(a.uid) + '">' +
+    esc('[' + (a.realm || 'cn') + '] ' + (a.label || shortUid(a.uid)) + ' · ' + fmtNum(a.credits)) +
+    (a.disabled ? '（禁用）' : (a.paused ? '（暂停）' : '')) + '</option>';
+  sel.innerHTML = accts.map(opt).join('');
+  pin.innerHTML = '<option value="">不固定</option>' + accts.map(opt).join('');
+  [...sel.options].forEach(o => { o.selected = prevSel.has(o.value); });
+  pin.value = prevPin;
+  if (pin.value !== prevPin) pin.value = '';
+}
+
+function keyScopeText(k) {
+  if (k.pin) return '固定 ' + shortUid(k.pin);
+  if (k.accounts && k.accounts.length) return k.accounts.length + ' 个号';
+  return '全池';
+}
+
+function renderKeys() {
+  const tb = $('keysBody');
+  if (!keyRows.length) {
+    tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">还没有密钥</div>在上面填个名字点「保存」，生成一个只属于某人的 key</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = keyRows.map(k => {
+    const t = k.today || {};
+    const status = k.enabled ? '<span class="tag ok">启用</span>' : '<span class="tag bad">停用</span>';
+    const limits = [];
+    if (k.max_rpm) limits.push(k.max_rpm + ' RPM');
+    if (k.daily_tokens) limits.push(fmtNum(k.daily_tokens) + ' /日');
+    const used = k.daily_tokens ? Math.min(100, Math.round((k.today_tokens || 0) / k.daily_tokens * 100)) : null;
+    const quota = used == null ? ''
+      : '<div class="hint" style="font-size:11px;color:' + (used >= 100 ? 'var(--bad)' : 'var(--ink-3)') + '">日额度已用 ' + used + '%</div>';
+    const note = k.note ? ' · ' + esc(k.note) : '';
+    return '<tr data-id="' + esc(k.id) + '">' +
+      '<td><div class="nm">' + esc(k.name || k.id) + '</div>' +
+        '<div class="hint" style="font-size:11px;color:var(--ink-3)">' + esc(k.id) + note + '</div></td>' +
+      '<td><code>' + esc(k.masked) + '</code></td>' +
+      '<td>' + status + '</td>' +
+      '<td>' + fmtNum(t.requests) +
+        '<div class="hint" style="font-size:11px;color:var(--ink-3)">失败 ' + fmtNum(t.failed) + '</div></td>' +
+      '<td>' + fmtNum(k.today_tokens) + quota + '</td>' +
+      '<td>' + fmtNum(k.total_tokens) + '</td>' +
+      '<td>' + (limits.length ? esc(limits.join(' · ')) : '不限') + '</td>' +
+      '<td>' + esc(keyScopeText(k)) +
+        (k.min_credit ? '<div class="hint" style="font-size:11px;color:var(--ink-3)">积分 ≥ ' + k.min_credit + '</div>' : '') + '</td>' +
+      '<td>' + ago(k.last_active) + '</td>' +
+      '<td class="ops" style="white-space:nowrap">' +
+        '<button class="xs" data-act="edit">编辑</button> ' +
+        '<button class="xs" data-act="toggle">' + (k.enabled ? '停用' : '启用') + '</button> ' +
+        '<button class="xs" data-act="rotate">轮换</button> ' +
+        '<button class="xs" data-act="reset">清零</button> ' +
+        '<button class="xs danger" data-act="delete">删除</button>' +
+      '</td></tr>';
+  }).join('');
+}
+
+function resetKeyEditor() {
+  keyEditId = null;
+  $('keyEditorTitle').textContent = '新建密钥';
+  $('btnKeyCancel').hidden = true;
+  $('keyId').disabled = false;
+  ['keyName', 'keyId', 'keyMinCredit', 'keyMaxRpm', 'keyDailyTokens', 'keyModels', 'keyNote'].forEach(id => { $(id).value = ''; });
+  [...$('keyAccounts').options].forEach(o => { o.selected = false; });
+  $('keyPin').value = '';
+  $('keyEnabled').checked = true;
+  $('keyContentLog').checked = false;
+}
+
+function openKeyEditor(k) {
+  keyEditId = k.id;
+  $('keyEditorTitle').textContent = '编辑密钥 · ' + (k.name || k.id);
+  $('btnKeyCancel').hidden = false;
+  $('keyName').value = k.name || '';
+  $('keyId').value = k.id;
+  $('keyId').disabled = true;
+  const allow = new Set(k.accounts || []);
+  [...$('keyAccounts').options].forEach(o => { o.selected = allow.has(o.value); });
+  $('keyPin').value = k.pin || '';
+  $('keyMinCredit').value = k.min_credit || '';
+  $('keyMaxRpm').value = k.max_rpm || '';
+  $('keyDailyTokens').value = k.daily_tokens || '';
+  $('keyModels').value = (k.models || []).join(', ');
+  $('keyNote').value = k.note || '';
+  $('keyEnabled').checked = !!k.enabled;
+  $('keyContentLog').checked = !!k.content_log;
+  $('keyNew').hidden = true;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function showNewKey(key) {
+  $('keyNew').hidden = false;
+  $('keyNewValue').value = key || '';
+  $('keyNewValue').focus();
+  $('keyNewValue').select();
+}
+
+if ($('btnKeySave')) $('btnKeySave').onclick = async () => {
+  const body = {
+    name: $('keyName').value.trim(),
+    accounts: [...$('keyAccounts').selectedOptions].map(o => o.value),
+    pin: $('keyPin').value,
+    min_credit: keyNum($('keyMinCredit').value),
+    max_rpm: keyNum($('keyMaxRpm').value),
+    daily_tokens: keyNum($('keyDailyTokens').value),
+    models: $('keyModels').value.split(',').map(s => s.trim()).filter(Boolean),
+    note: $('keyNote').value.trim(),
+    enabled: $('keyEnabled').checked,
+    content_log: $('keyContentLog').checked,
+  };
+  try {
+    if (keyEditId) {
+      await api('keys/' + encodeURIComponent(keyEditId), { method: 'POST', body: JSON.stringify(body) });
+      toast('已保存');
+      resetKeyEditor();
+    } else {
+      const id = $('keyId').value.trim();
+      if (id) body.id = id;
+      const d = await api('keys', { method: 'POST', body: JSON.stringify(body) });
+      toast('密钥已创建，明文只显示这一次');
+      resetKeyEditor();
+      showNewKey(d.key);
+    }
+    loadKeys();
+  } catch (e) { toast(e.message, 'bad'); }
+};
+
+if ($('btnKeyNew')) $('btnKeyNew').onclick = () => { resetKeyEditor(); $('keyNew').hidden = true; $('keyName').focus(); };
+if ($('btnKeyCancel')) $('btnKeyCancel').onclick = () => { resetKeyEditor(); $('keyNew').hidden = true; };
+if ($('btnKeysRefresh')) $('btnKeysRefresh').onclick = () => loadKeys();
+if ($('btnKeyCopy')) $('btnKeyCopy').onclick = async () => {
+  const v = $('keyNewValue').value;
+  if (!v) return;
+  try { await navigator.clipboard.writeText(v); toast('已复制'); }
+  catch (e) { $('keyNewValue').select(); toast('复制失败，请手动复制', 'bad'); }
+};
+
+if ($('keysBody')) $('keysBody').addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const tr = btn.closest('tr');
+  const id = tr && tr.dataset.id;
+  const k = keyRows.find(x => x.id === id);
+  if (!k) return;
+  const act = btn.dataset.act;
+  const path = 'keys/' + encodeURIComponent(id);
+  try {
+    if (act === 'edit') { openKeyEditor(k); return; }
+    if (act === 'toggle') {
+      await api(path, { method: 'POST', body: JSON.stringify({ enabled: !k.enabled }) });
+      toast(k.enabled ? '已停用' : '已启用');
+    } else if (act === 'rotate') {
+      if (!confirm('轮换后旧 key 立即失效，正在使用的人需要换新 key。确认轮换？')) return;
+      const d = await api(path + '/rotate', { method: 'POST' });
+      showNewKey(d.key);
+      toast('已轮换，新密钥只显示这一次');
+    } else if (act === 'reset') {
+      if (!confirm('清零该密钥的用量统计与 RPM 窗口？（不影响账号与密钥本身）')) return;
+      await api(path + '/reset', { method: 'POST' });
+      toast('已清零');
+    } else if (act === 'delete') {
+      if (!confirm('删除后该 key 立即失效，且用量统计一并清除。确认删除？')) return;
+      await api(path + '/delete', { method: 'POST' });
+      toast('已删除');
+    }
+    loadKeys();
+  } catch (err) { toast(err.message, 'bad'); }
+});
+
+/* ══ 对话归档（按密钥 / 日期回看完整请求与响应）═════════════════════════════
+   归档只对「全局开关打开 + 该密钥 content_log」的请求生效；本视图只读。 */
+let ctRecords = [];
+
+async function loadContent() {
+  const note = $('ctNote'), list = $('ctList');
+  if (!list) return;
+  try {
+    const d = await api('keys');
+    const sel = $('ctKey');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">全部密钥</option>' +
+      (d.keys || []).map(k => '<option value="' + esc(k.id) + '">' + esc(k.name || k.id) + '</option>').join('');
+    if (prev && (d.keys || []).some(k => k.id === prev)) sel.value = prev;
+
+    const key = sel.value;
+    const dd = await api('content/days' + (key ? '?key=' + encodeURIComponent(key) : ''));
+    const days = dd.days || [];
+    const ds = $('ctDate');
+    const prevD = ds.value;
+    ds.innerHTML = days.length
+      ? days.map(x => '<option value="' + esc(x) + '">' + esc(x) + '</option>').join('')
+      : '<option value="">（无归档）</option>';
+    if (days.indexOf(prevD) >= 0) ds.value = prevD;
+    if (!days.length) {
+      ctRecords = [];
+      list.innerHTML = '<div class="empty"><div class="big">还没有归档</div>需要同时满足：配置里打开 logging.content_archive.enabled，且该密钥勾选「归档对话正文」</div>';
+      note.textContent = '—';
+      return;
+    }
+    const date = ds.value;
+    const rd = await api('content?limit=100' +
+      (key ? '&key=' + encodeURIComponent(key) : '') +
+      (date ? '&date=' + encodeURIComponent(date) : ''));
+    ctRecords = rd.records || [];
+    renderContent();
+    note.textContent = ctRecords.length + ' 条 · 保留 ' + (dd.keep_days || '-') + ' 天';
+  } catch (e) {
+    list.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  }
+}
+
+function renderContent() {
+  const list = $('ctList');
+  if (!ctRecords.length) {
+    list.innerHTML = '<div class="empty">这一天没有记录</div>';
+    return;
+  }
+  list.innerHTML = ctRecords.map(r => {
+    const ok = r.status >= 200 && r.status < 300;
+    const toks = (r.prompt_tokens || 0) + (r.completion_tokens || 0);
+    const when = r.time ? new Date(r.time).toLocaleString() : '—';
+    const summary =
+      '<summary style="cursor:pointer;padding:6px 0">' +
+      '<span class="tag ' + (ok ? 'ok' : 'bad') + '">' + r.status + '</span> ' +
+      '<b>' + esc(r.key || '—') + '</b> · ' + esc(r.model || '—') +
+      ' <span class="hint" style="color:var(--ink-3)">' + esc(when) +
+      (toks ? ' · ' + fmtNum(toks) + ' tok' : '') +
+      (r.stream ? ' · 流式' : '') +
+      (r.truncated ? ' · 已截断' : '') +
+      (r.account ? ' · ' + esc(r.account) : '') +
+      '</span></summary>';
+    const pre = 'white-space:pre-wrap;word-break:break-word;overflow:auto;background:var(--surface-2);padding:10px;border-radius:8px;margin:4px 0 0';
+    const body =
+      '<div style="display:grid;gap:10px;padding:6px 0 12px">' +
+      (r.text ? '<div><div class="lb">助手正文</div><pre style="' + pre + ';max-height:420px">' + esc(r.text) + '</pre></div>' : '') +
+      '<div><div class="lb">请求</div><pre style="' + pre + ';max-height:320px">' + esc(prettyJSON(r.request)) + '</pre></div>' +
+      (r.response ? '<details><summary style="cursor:pointer;color:var(--ink-3)">原始响应</summary><pre style="' + pre + ';max-height:420px">' + esc(r.response) + '</pre></details>' : '') +
+      '</div>';
+    return '<details style="border-bottom:1px solid var(--line-soft)">' + summary + body + '</details>';
+  }).join('');
+}
+
+function prettyJSON(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') {
+    try { return JSON.stringify(JSON.parse(v), null, 2); } catch (e) { return v; }
+  }
+  try { return JSON.stringify(v, null, 2); } catch (e) { return String(v); }
+}
+
+if ($('btnCtRefresh')) $('btnCtRefresh').onclick = () => loadContent();
+if ($('ctKey')) $('ctKey').onchange = () => loadContent();
+if ($('ctDate')) $('ctDate').onchange = () => loadContent();

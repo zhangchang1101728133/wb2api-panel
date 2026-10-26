@@ -17,8 +17,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/apikey"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/contentlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/keyusage"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -31,11 +34,11 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
+// appVersion 网关版本（面板 + 任务体系），透出到 /panel/api/overview。
 // 用 var 而非 const，便于编译期注入：
 //
-//	go build -ldflags "-X main.appVersion=1.13.1-panel" ./cmd/server
-var appVersion = "1.13.1-panel"
+//	go build -ldflags "-X main.appVersion=1.14.0-panel" ./cmd/server
+var appVersion = "1.14.0-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -259,10 +262,13 @@ func main() {
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
+		AdminKey:             cfg.Panel.AdminKey,
+		Keys:                 cfg.KeyTable,
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     cfg.Logging.RequestClientInfo,
 		HiddenModels:         livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
+		ContentArchive:       cfg.Logging.ContentArchive.Enabled,
 	})
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
@@ -271,6 +277,29 @@ func main() {
 	rec.Start()
 	defer rec.Stop()
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
+
+	// 按密钥用量：与 usage 同目录、独立文件。它承载「谁用了多少」与 RPM/日额度，
+	// 与账号维度互不覆盖；缺失时功能整体降级为「不统计、不限额」。
+	keyUsagePath := stateSibling(cfg.StateFile, "keyusage.json")
+	keyRec := keyusage.New(keyUsagePath)
+	keyRec.Start()
+	defer keyRec.Stop()
+	log.Printf("[keyusage] 按密钥用量记录已启用: %s", keyRec.Describe())
+
+	// 对话正文归档：默认关闭。打开后也只归档显式 content_log=true 的密钥流量，
+	// 因此「全局开 + 某个朋友单独开」才真正落盘。目录随 state_file 搬移。
+	var contentLog *contentlog.Recorder
+	if cfg.Logging.ContentArchive.Enabled {
+		dir := cfg.Logging.ContentArchive.Dir
+		if dir == "" {
+			dir = stateSibling(cfg.StateFile, "content-archive")
+		}
+		contentLog = contentlog.New(dir, cfg.Logging.ContentArchive.KeepDays)
+		contentLog.Start()
+		defer contentLog.Stop()
+	} else {
+		log.Printf("[contentlog] 对话正文归档未开启（logging.content_archive.enabled=false）")
+	}
 
 	// 请求指标始终启用；JSONL 归档只写脱敏元数据，写盘失败不影响聊天请求。
 	requestLog := reqlog.New(reqlog.Config{
@@ -299,11 +328,13 @@ func main() {
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
-		RequestLog:  requestLog,
-		Upstream:    up,
+		KeyUsage:    keyRec,
+		ContentLog:  contentLog,
+		RequestLog:  requestLog,		Upstream:    up,
 		Scheduler:   sch,
 		AuthDir:     cfg.AuthDir,
 		APIKey:      cfg.APIKey,
+		AdminKey:    cfg.Panel.AdminKey,
 		RedisMode:   redisMode,
 		StickyCount: sessCount,
 		Version:     appVersion,
@@ -317,6 +348,22 @@ func main() {
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
+		},
+		// 多密钥读写：与配置页共用同一条校验+落盘+热生效链路。
+		LoadKeys: func() ([]apikey.Key, error) {
+			c, err := Load(*cfgPath)
+			if err != nil {
+				return nil, err
+			}
+			return c.APIKeys, nil
+		},
+		SaveKeys: func(keys []apikey.Key) error {
+			raw, err := json.Marshal(map[string]any{"api_keys": keys})
+			if err != nil {
+				return err
+			}
+			_, err = saveConfig(raw, *cfgPath, live, p, up, sch)
+			return err
 		},
 		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
 		CreditHistory: creditHist,
@@ -334,6 +381,8 @@ func main() {
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
+		AdminKey:     cfg.Panel.AdminKey,
+		Keys:         cfg.KeyTable,
 		Session:      sessRouter,
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
@@ -341,6 +390,8 @@ func main() {
 		Panel:        pn,
 		Live:         live,
 		Usage:        rec,
+		KeyUsage:     keyRec,
+		ContentLog:   contentLog,
 		RequestLog:   requestLog,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
@@ -524,10 +575,13 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
+		AdminKey:             newCfg.Panel.AdminKey,
+		Keys:                 newCfg.KeyTable,
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
 		HiddenModels:         livecfg.NormalizeHiddenModels(newCfg.Models.Hidden),
+		ContentArchive:       newCfg.Logging.ContentArchive.Enabled,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
@@ -590,6 +644,8 @@ func restartRequiredFields(c *Config) []string {
 	}
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
+	// 正文归档器在装配期创建（目录句柄/保留天数在构造时确定），运行期只读开关。
+	out = append(out, "logging.content_archive")
 	out = append(out, "server.read_timeout")
 	return out
 }

@@ -12,37 +12,68 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
 
+// PickFilter 调用方级选号约束（多密钥场景）。
+//
+// 零值 = 不限，行为与不带过滤的选号完全一致。由 handler 从密钥条目构造，
+// 池子只做机械过滤，不感知密钥语义。
+type PickFilter struct {
+	// Allow 允许的账号 uid 集合；nil/空 = 全池。
+	Allow map[string]struct{}
+	// MinCredit 积分下限；<=0 = 不设门槛。
+	MinCredit int64
+}
+
+// permits 判定账号是否满足调用方约束。
+func (f PickFilter) permits(uid string, credits int64) bool {
+	if len(f.Allow) > 0 {
+		if _, ok := f.Allow[uid]; !ok {
+			return false
+		}
+	}
+	if f.MinCredit > 0 && credits < f.MinCredit {
+		return false
+	}
+	return true
+}
+
 // Pick 单一选号入口（无请求级轮换、无 realm 过滤，模型感知缺省账号级）。
 // 需要请求级轮换（tried）或分池（realm）时用 PickExcludingForRealm。
 func (p *Pool) Pick() *auth.Auth {
-	return p.pick(nil, "", "")
+	return p.pick(nil, "", "", PickFilter{})
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
 // 挑选策略：healthy 账号中按权重取前 5 名，再在 Top5 内按同一权重加权随机抽签，
 // 意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
-	return p.pick(tried, "", "")
+	return p.pick(tried, "", "", PickFilter{})
 }
 
 // PickExcludingForModel 模型感知选号：等同 PickExcluding，但对「6004 模型级冷却中的
 // 账号」进行模型豁免——请求模型与其 trigger 模型不同时视为可用（issue #31）。
 // reqModel 为空时即普通 PickExcluding（不影响既有调用语义）。
 func (p *Pool) PickExcludingForModel(tried map[string]bool, reqModel string) *auth.Auth {
-	return p.pick(tried, reqModel, "")
+	return p.pick(tried, reqModel, "", PickFilter{})
 }
 
 // PickExcludingForRealm 模型感知 + 分池选号：候选集先按 Realm()==realm 过滤
 // （realm 空 = 不过滤，退化为 PickExcludingForModel），再按模型健康口径判定。
 // 供 handler 在 global/cn 双域下分流（global 模型请求只路由 global 账号）。
 func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm string) *auth.Auth {
-	return p.pick(tried, reqModel, realm)
+	return p.pick(tried, reqModel, realm, PickFilter{})
+}
+
+// PickExcludingForRealmFiltered 在 PickExcludingForRealm 之上叠加调用方约束
+// （可用账号集合 + 积分下限）。多密钥分发时用：每个密钥只能碰自己被允许的号。
+func (p *Pool) PickExcludingForRealmFiltered(tried map[string]bool, reqModel, realm string, f PickFilter) *auth.Auth {
+	return p.pick(tried, reqModel, realm, f)
 }
 
 // pick 在 healthy 候选集中按权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
 // realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。
-func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
+// filter 非零值时叠加调用方约束（账号集合 / 积分下限），全冷却兜底同样受限。
+func (p *Pool) pick(tried map[string]bool, reqModel, realm string, filter PickFilter) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -58,6 +89,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
+		}
+		if !filter.permits(uid, e.credits) {
+			continue // 调用方约束：不在允许账号集合内，或积分低于该密钥的门槛
 		}
 		// 惰性清理过期的模型级冷却与成本台账（两者的 map 都不无限膨胀；
 		// status 只读遍历天然跳过过期项，但内存条目必须在此真正删除）。
@@ -80,7 +114,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if p.strategyForRealmLocked(realm) != WeightedRandom {
 			return nil // 有序策略等待恢复，不提前试探仍在冷却中的账号。
 		}
-		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
+		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel, filter)
 	}
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
@@ -312,11 +346,14 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 // 这里，若兜底不看保底，触底号会被「捞回来」继续接收费模型——表现为同一条
 // floor WARN 反复刷同一个号（实测：credits=1 < floor=150 仍持续中选）。
 // 兜底是**最后一道**选号路径，保底在它之前挡不住就等于没挡。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string) *auth.Auth {
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string, filter PickFilter) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
+		}
+		if !filter.permits(uid, e.credits) {
+			continue // 调用方约束：兜底也不越过密钥的账号集合 / 积分门槛
 		}
 		if realm != "" && e.a.Realm() != realm {
 			continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底

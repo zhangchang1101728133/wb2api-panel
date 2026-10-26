@@ -22,8 +22,10 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/apikey"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/contentlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/keyusage"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
@@ -39,6 +41,8 @@ type Config struct {
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
 	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
+	// AdminKey 管理面专用密钥（panel.admin_key）；空 = 只用 APIKey。
+	AdminKey  string
 	RedisMode string               // "upstash" / "noop"，仅观测透出
 	Version   string               // 面板版本号（展示用）
 
@@ -59,6 +63,14 @@ type Config struct {
 
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
+	// KeyUsage 按调用方密钥的用量记录器（nil = 密钥统计/限额展示降级为空）。
+	KeyUsage *keyusage.Recorder
+	// LoadKeys / SaveKeys 多密钥读写（由 main 注入，复用配置校验与热生效）。
+	// 两者都 nil 时密钥接口返回 501。
+	LoadKeys func() ([]apikey.Key, error)
+	SaveKeys func([]apikey.Key) error
+	// ContentLog 对话正文归档（nil = 未开启，内容接口返回 501）。
+	ContentLog *contentlog.Recorder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
 	RequestLog *reqlog.Recorder
 	// CreditHistory 积分变动账本（nil = 积分历史接口返回 501）。只读展示：
@@ -94,6 +106,10 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// keysMu 串行化 api_keys 的读-改-写。密钥编辑是「读配置 → 改一项 → 整表
+	// 回写」，两个浏览器标签页同时保存会互相覆盖，故整段加锁。
+	keysMu sync.Mutex
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -193,6 +209,16 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+	// 多密钥：一人一 key，各自用量与限额（见 keys.go）。
+	p.mux.HandleFunc("GET /panel/api/keys", p.withAuth(p.keysList))
+	p.mux.HandleFunc("POST /panel/api/keys", p.withAuth(p.keyCreate))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}", p.withAuth(p.keyUpdate))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/delete", p.withAuth(p.keyDelete))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/rotate", p.withAuth(p.keyRotate))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/reset", p.withAuth(p.keyResetUsage))
+	// 对话正文归档回看（仅 admin；需要全局开关 + 该密钥 content_log）。
+	p.mux.HandleFunc("GET /panel/api/content", p.withAuth(p.contentList))
+	p.mux.HandleFunc("GET /panel/api/content/days", p.withAuth(p.contentDays))
 	p.mux.HandleFunc("GET /panel/api/compensation", p.withAuth(p.compensation))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/compensation", p.withAuth(p.accountCompensationClaim))
 	p.mux.HandleFunc("POST /panel/api/compensation_all", p.withAuth(p.compensationAll))
@@ -205,12 +231,14 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.mux.ServeHTTP(w, r)
 }
 
-// withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
-// api_key 为空时放行。密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求
-// 即用新值（无需重启）。
+// withAuth 管理面鉴权：只接受管理员凭证（api_key / panel.admin_key）。
+//
+// 多密钥的分发密钥（api_keys）**不**能进面板——否则把 key 发给朋友等于把
+// 账号池、全部请求日志和配置页一起交出去。密钥经 livecfg 快照读取，面板里
+// 改了密钥下一个请求即用新值。
 func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, p.apiKey()) {
+		if !p.isAdmin(r) {
 			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
 			return
 		}
@@ -218,12 +246,30 @@ func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// apiKey 当前生效密钥（Live 优先，回落静态字段）。
+// isAdmin 判定管理员凭证。Live 为 nil 的裸用/测试路径用静态字段合成同口径快照。
+func (p *Panel) isAdmin(r *http.Request) bool {
+	if p.cfg.Live != nil {
+		return p.cfg.Live.Load().IsAdmin(r)
+	}
+	return livecfg.Snapshot{APIKey: p.cfg.APIKey, AdminKey: p.cfg.AdminKey}.IsAdmin(r)
+}
+
+// apiKey 当前生效密钥（Live 优先，回落静态字段）。仅用于展示与兼容判断。
 func (p *Panel) apiKey() string {
 	if p.cfg.Live != nil {
 		return p.cfg.Live.Load().APIKey
 	}
 	return p.cfg.APIKey
+}
+
+// authRequired 是否启用了鉴权。api_key 与 panel.admin_key 任一非空即为启用——
+// 只看 api_key 会在「只配了管理密钥」时把鉴权状态显示反。
+func (p *Panel) authRequired() bool {
+	if p.cfg.Live != nil {
+		s := p.cfg.Live.Load()
+		return s.APIKey != "" || s.AdminKey != ""
+	}
+	return p.cfg.APIKey != "" || p.cfg.AdminKey != ""
 }
 
 // expiringSoonWindow 返回调度器当前生效的快过期路由窗口；测试面板无调度器时返回 0。
@@ -263,7 +309,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":         p.cfg.Version,
 		"uptime_sec":      int(time.Since(p.started).Seconds()),
-		"auth_required":   p.apiKey() != "",
+		"auth_required":   p.authRequired(),
 		"redis_mode":      p.cfg.RedisMode,
 		"sticky_sessions": sticky,
 		"total":           total,

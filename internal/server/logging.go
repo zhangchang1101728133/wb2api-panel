@@ -3,6 +3,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -380,9 +381,57 @@ type requestTrace struct {
 	// chatStat.model 覆盖，二者不会同时生效。
 	model string
 	stat    *chatStat
+	// key 调用方密钥 id（多密钥）。管理员流量留空，日志形状与单密钥部署一致。
+	key       string
+	// 对话正文归档：archive 由 withAuth 按「全局开关 + 密钥 content_log」置位；
+	// reqBody/chatModel/chatStream 由 chat 入口回填。
+	archive    bool
+	reqBody    []byte
+	chatModel  string
+	chatStream bool
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string
+}
+
+// noteTraceChat 回填归档所需的对话上下文（请求体 / 模型 / 是否流式）。
+func noteTraceChat(r *http.Request, body []byte, model string, stream bool) {
+	if r == nil {
+		return
+	}
+	if tr, ok := r.Context().Value(requestTraceKey{}).(*requestTrace); ok {
+		tr.reqBody = body
+		tr.chatModel = model
+		tr.chatStream = stream
+	}
+}
+
+// setKey 记录本次请求的调用方密钥 id（由 withAuth 在鉴权通过后回填）。
+// trace 以指针形式放在请求上下文里，鉴权发生在 ServeHTTP 之后，故用回填而非构造时传入。
+func (t *requestTrace) setKey(id string) {
+	if t != nil {
+		t.key = id
+	}
+}
+
+// noteTraceKey 把密钥 id 回填进当前请求的 trace（无 trace 时为空操作）。
+func noteTraceKey(r *http.Request, id string) {
+	if r == nil || id == "" {
+		return
+	}
+	if tr, ok := r.Context().Value(requestTraceKey{}).(*requestTrace); ok {
+		tr.setKey(id)
+	}
+}
+
+// noteTraceArchive 标记本次请求需要归档正文（无 trace 时为空操作）。
+func noteTraceArchive(r *http.Request) {
+	if r == nil {
+		return
+	}
+	if tr, ok := r.Context().Value(requestTraceKey{}).(*requestTrace); ok {
+		tr.archive = true
+	}
 }
 
 // captureClientInfo 采集调用来源（客户端 IP + 截断后的 UA）。开关关闭时保持空串：
@@ -449,6 +498,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		Time:      t.start,
 		RequestID: t.id,
 		Path:      path,
+		Key:       t.key,
 		Status:    status,
 	}
 	if t.account != "" {
@@ -493,9 +543,16 @@ func (t *requestTrace) event(status int) reqlog.Event {
 
 // responseObserver 捕获 handler 实际写出的 HTTP 状态，同时保留 Flusher/Unwrap，
 // 避免破坏 SSE 逐帧刷新。
+//
+// 当请求被标记为「归档正文」（trace.archive）时，顺带把写出的字节收进内存缓冲，
+// 供 ServeHTTP 出口落盘。未归档的请求只多一次布尔判断，不分配缓冲。
 type responseObserver struct {
 	http.ResponseWriter
 	status int
+	trace  *requestTrace
+
+	buf       bytes.Buffer
+	truncated bool
 }
 
 func (o *responseObserver) WriteHeader(code int) {
@@ -509,6 +566,18 @@ func (o *responseObserver) Write(p []byte) (int, error) {
 	if o.status == 0 {
 		o.status = http.StatusOK
 	}
+	if o.trace != nil && o.trace.archive {
+		if room := maxArchivedResponseBytes - o.buf.Len(); room > 0 {
+			if len(p) <= room {
+				o.buf.Write(p)
+			} else {
+				o.buf.Write(p[:room])
+				o.truncated = true
+			}
+		} else if len(p) > 0 {
+			o.truncated = true
+		}
+	}
 	return o.ResponseWriter.Write(p)
 }
 
@@ -519,6 +588,10 @@ func (o *responseObserver) Flush() {
 }
 
 func (o *responseObserver) Unwrap() http.ResponseWriter { return o.ResponseWriter }
+
+// maxArchivedResponseBytes 响应侧捕获上限。请求侧上限由 contentlog 自己再兜一层，
+// 这里限制的是内存占用——超长流式回答截断即可，不能把进程内存吃穿。
+const maxArchivedResponseBytes = 2 << 20
 
 // 请求流水行的固定列宽（显示列宽，非字节）。取固定宽度而不是让内容自然长度撑开，
 // 是为了让 stdout 里成百上千行能竖着扫——否则模型名长短不一、中文昵称按字节补空格

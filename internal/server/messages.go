@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -275,7 +276,21 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, fail := h.runSearch(r.Context(), query, 0, searchMetaFromRequest(r))
+	// 密钥限额：与 chat 同口径，但用 Anthropic 错误外壳（本端点协议不同）。
+	caller := keyFrom(r.Context())
+	if status, _, msg, retry := h.keyLimitError(caller, time.Now()); status != 0 {
+		if retry > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+		}
+		errType := "api_error"
+		if status == http.StatusTooManyRequests {
+			errType = "rate_limit_error"
+		}
+		writeMessagesError(w, status, errType, msg)
+		return
+	}
+
+	out, fail := h.runSearch(r.Context(), caller, query, 0, searchMetaFromRequest(r))
 	if fail != nil {
 		// Anthropic 错误类型映射：限流用 rate_limit_error，其余用 api_error，
 		// 与真实 Anthropic 的错误词表保持可识别。

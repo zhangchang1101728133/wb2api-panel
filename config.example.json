@@ -8,13 +8,35 @@
     "read_timeout": "300s"
   },
   "panel": {
-    "package_detail_limit": 5
+    "package_detail_limit": 5,
+    "admin_key": ""
   },
+  "api_keys": [
+    {
+      "id": "alice",
+      "name": "Alice",
+      "key": "sk-alice-test-key",
+      "enabled": true,
+      "accounts": [],
+      "pin": "",
+      "min_credit": 0,
+      "models": [],
+      "max_rpm": 0,
+      "daily_tokens": 0,
+      "content_log": false,
+      "note": "示例：一人一 key；留空 api_keys 即只使用 api_key"
+    }
+  ],
   "logging": {
     "request_archive_enabled": true,
     "request_retention_days": 7,
     "request_archive_max_mb": 100,
-    "request_client_info": true
+    "request_client_info": true,
+    "content_archive": {
+      "enabled": false,
+      "dir": "",
+      "keep_days": 7
+    }
   },
   "cooldown": {
     "soft_rate": "600s",

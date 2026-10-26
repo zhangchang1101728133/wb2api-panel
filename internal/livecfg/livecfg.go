@@ -9,18 +9,48 @@
 package livecfg
 
 import (
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/apikey"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 )
 
 // Snapshot 一次读取的不可变配置视图。
 type Snapshot struct {
-	APIKey               string        // 网关/面板共同鉴权密钥；空 = 不鉴权
+	APIKey string // 网关鉴权密钥；空 = 不鉴权（既有单密钥语义，仍然有效）
+	// AdminKey 管理面专用密钥（panel.admin_key）。空 = 只用 APIKey。
+	// 与 APIKey 并列而不是替换：老客户端拿 api_key 调 /v1/* 不受影响。
+	AdminKey string
+	// Keys 多密钥表（api_keys）。nil / 空表 = 未启用多密钥。
+	// 表本身不可变，快照整体替换即完成热更新。
+	Keys                 *apikey.Table
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
 	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
 	HiddenModels         map[string]struct{} // 精确隐藏的模型 id（已归一化为 "cn:x"/"global:x" 全量形式）；nil = 不隐藏
+	// ContentArchive 对话正文归档全局开关（logging.content_archive.enabled）。
+	// 密钥的 content_log 只是第二道闸：两者都开才归档。
+	ContentArchive bool
+}
+
+// IsAdmin 判定请求是否持有管理员凭证。
+//
+// 两个密钥都为空 = 未启用鉴权（既有语义），恒为 true。
+// APIKey 与 AdminKey 同时有效：前者兼容存量客户端，后者可单独轮换。
+func (s Snapshot) IsAdmin(r *http.Request) bool {
+	if s.APIKey == "" && s.AdminKey == "" {
+		return true
+	}
+	if s.APIKey != "" && httpauth.VerifyBearer(r, s.APIKey) {
+		return true
+	}
+	if s.AdminKey != "" && httpauth.VerifyBearer(r, s.AdminKey) {
+		return true
+	}
+	return false
 }
 
 // Holder 原子持有当前快照。

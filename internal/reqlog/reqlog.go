@@ -65,6 +65,8 @@ type Event struct {
 	Time             time.Time `json:"time"`
 	RequestID        string    `json:"request_id"`
 	Path             string    `json:"path"`
+	// Key 调用方密钥 id（多密钥）。管理员/单密钥部署为空，此时字段省略。
+	Key              string    `json:"key,omitempty"`
 	Account          string    `json:"account,omitempty"`
 	Model            string    `json:"model,omitempty"`
 	Status           int       `json:"status"`
@@ -91,6 +93,8 @@ type Event struct {
 // 供「今天 / 近 7 天 / 自定义区间」这类时间查询使用。
 type Filter struct {
 	Outcome   string
+	// Key 调用方密钥 id 精确匹配（不做包含匹配：id 短且可能互为前缀）。
+	Key       string
 	Account   string
 	Model     string
 	ClientIP  string
@@ -571,6 +575,10 @@ func readFile(path string, filter Filter) ([]Event, error) {
 
 func (f Filter) match(e Event) bool {
 	if f.Outcome != "" && e.Outcome != f.Outcome {
+		return false
+	}
+	// Key 精确匹配：id 是用户自定义的短标识，包含匹配会把 alice 的查询串到 alice2。
+	if f.Key != "" && e.Key != f.Key {
 		return false
 	}
 	if !containsFold(e.Account, f.Account) {

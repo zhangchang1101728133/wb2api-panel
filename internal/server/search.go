@@ -16,7 +16,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/apikey"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
@@ -54,14 +57,32 @@ func searchMetaFromRequest(r *http.Request) upstream.ChatMeta {
 //
 // 轮转语义与 chat 完全一致：PickExcluding → 在途租约 → token 预刷新 →
 // 上游调用 → 按 ErrKind 走 applyErrorPolicy → 抖动退避换号。
-func (h *Handler) runSearch(ctx context.Context, query string, maxResults int, meta upstream.ChatMeta) (*upstream.SearchOutcome, *searchFailure) {
+func (h *Handler) runSearch(ctx context.Context, caller apikey.Entry, query string, maxResults int, meta upstream.ChatMeta) (*upstream.SearchOutcome, *searchFailure) {
 	tried := map[string]bool{}
 	var lastErr error
 	var lastStatus int
 	var lastKind upstream.ErrKind
 
+	// 多密钥约束与 chat 同口径：pin → 账号集合 → 全池回退（可用性优先）。
+	filter := pool.PickFilter{Allow: caller.Allow, MinCredit: caller.MinCredit}
+	pick := func(f pool.PickFilter) *auth.Auth {
+		if caller.Pin != "" {
+			if acct := h.cfg.Pool.PickByUIDForModelFiltered(caller.Pin, "", pool.PickFilter{MinCredit: caller.MinCredit}); acct != nil && !tried[acct.UID] {
+				return acct
+			}
+		}
+		return h.cfg.Pool.PickExcludingForRealmFiltered(tried, "", "", f)
+	}
+
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.cfg.Pool.PickExcluding(tried)
+		acct := pick(filter)
+		if acct == nil && len(caller.Allow) > 0 {
+			acct = pick(pool.PickFilter{MinCredit: caller.MinCredit})
+			if acct != nil {
+				log.Printf("WARN: [key] %s 限定账号全部不可用，搜索已回退全池 acct=%s",
+					caller.ID, logfmt.Label(acct.UID, acct.Nickname))
+			}
+		}
 		if acct == nil {
 			break
 		}
