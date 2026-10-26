@@ -378,7 +378,7 @@ curl -s http://localhost:7863/v1/search/messages \
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `listen` | `:7863` | HTTP 监听地址 |
-| `api_key` | 空 | 网关鉴权密钥，同时也是管理员密钥；**空 = 不鉴权直接放行**（公网必须设置） |
+| `api_key` | 空 | 管理员密钥（`/status` 全池视图与 `/panel/*`）。配置了 `api_keys` 后不再接受它调用 `/v1/*`；未配置 `api_keys` 时仍是网关密钥。**空 = 不鉴权直接放行**（公网必须设置） |
 | `panel.admin_key` | 空 | 管理面专用密钥（`/panel/*` 与 `/status`）；空 = 回退 `api_key`。用户密钥永远进不了管理面 |
 | `api_keys` | `[]` | 多密钥表（一人一 key）：每项 `id` / `key` / `name` / `enabled` / `accounts` / `pin` / `min_credit` / `models` / `max_rpm` / `daily_tokens` / `content_log` / `note`。详见 [多密钥：一人一 Key](#多密钥一人一-key) |
 | `logging.content_archive.enabled` | `false` | 对话正文归档总开关；开启后仍只归档 `api_keys` 中 `content_log=true` 的密钥流量；改动需重启 |
@@ -765,11 +765,40 @@ baseURL 指向 `<网关>/v1/search`，即可零代码接入本网关的搜索能
 
 ### 鉴权边界
 
-- `api_key` 与 `panel.admin_key` 是**管理员**：`/v1/*`、`/status`、`/panel/*` 全通。
-- `api_keys[].key` 是**用户**：只通 `/v1/*`；`/status` 与 `/panel/*` 一律 401——否则用户能看到全池账号 uid、积分与冷却原因。
+- `api_key` 与 `panel.admin_key` 是**管理员**：`/status`（全池视图）与 `/panel/*`。
+- `api_keys[].key` 是**用户**：`/v1/*`（对话 / 模型列表 / 搜索）与 `/status`（自己的额度视图）。
+- **配置了 `api_keys` 之后，管理密钥不能再调 `/v1/*`**：否则管理员流量会混进密钥账本，「这张 key 是谁在用」就答不清。拿着管理密钥调 `/v1/*` 会得到 `401 admin_key_not_allowed`，提示换成用户密钥。
+- 未配置 `api_keys` 时保持单密钥语义：`api_key` 同时是网关密钥，升级不会断流。
 - 两个管理员密钥都为空且 `api_keys` 为空 = 不鉴权（只适合内网自用）。
 
 校验方式是遍历全部密钥做常量时间比较（命中后不提前 `break`），避免通过响应时间反推密钥前缀。
+
+### 查额度
+
+用分发的密钥直接查 `/status`，返回的是**自己那份**视图：
+
+```bash
+curl -s https://your-host/status -H "Authorization: Bearer sk-xxxx"
+```
+
+```json
+{
+  "service": "workbuddy2api",
+  "key": { "id": "alice", "name": "Alice", "masked": "sk-1234…cdef",
+           "accounts_scope": "limited", "models": [], "min_credit": 0 },
+  "quota": { "rpm_used": 3, "rpm_limit": 30,
+             "daily_tokens_used": 12345, "daily_tokens_limit": 500000,
+             "daily_tokens_left": 487655 },
+  "today": { "requests": 12, "ok": 12, "failed": 0, "tokens": 12345 },
+  "total": { "requests": 340, "tokens": 812345 },
+  "credits": { "remaining": 439, "total": 440, "accounts": 1, "accounts_available": 1 },
+  "last_active": "2026-10-26T13:20:11+08:00"
+}
+```
+
+`credits.remaining` 是该密钥**可用账号**的积分合计（`accounts_scope=all` 时即全池），`accounts_available` 是其中当前能出票的号数。账号 uid、昵称、冷却原因不会出现在用户视图里——那是管理员信息。
+
+`daily_tokens_left = -1` 表示不限额。
 
 ### 选号三级回退
 

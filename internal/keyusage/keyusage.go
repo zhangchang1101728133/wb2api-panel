@@ -245,6 +245,25 @@ func (r *Recorder) AllowRPM(keyID string, limit int, now time.Time) (bool, time.
 	return true, 0
 }
 
+// RPMUsed 返回该密钥最近一分钟内的请求数（只读，不占用窗口）。
+// 面板与 /status 的「当前 RPM」用它，避免为了展示而把一次请求记进限额。
+func (r *Recorder) RPMUsed(keyID string, now time.Time) int {
+	if keyID == "" {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cut := now.Add(-time.Minute)
+	hits := r.wins[keyID]
+	i := 0
+	for i < len(hits) && !hits[i].After(cut) {
+		i++
+	}
+	hits = hits[i:]
+	r.wins[keyID] = hits
+	return len(hits)
+}
+
 // TodayTokens 返回该密钥今日已用 token（prompt + completion）。
 func (r *Recorder) TodayTokens(keyID string, now time.Time) int64 {
 	if keyID == "" {

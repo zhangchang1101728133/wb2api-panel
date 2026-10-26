@@ -3,11 +3,13 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/apikey"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/keyusage"
 )
 
 // keyLimitError 判定密钥限额，返回 (状态码, 错误码, 文案, 建议重试秒数)。
@@ -95,6 +97,95 @@ func callerAllowsModel(e apikey.Entry, realm, bareModel string) bool {
 		}
 	}
 	return false
+}
+
+// userStatus 用户密钥的额度视图（/status 的用户身份分支）。
+//
+// 只回「我自己的限额与用量」+「我可用范围内还有多少积分」：账号 uid、昵称、
+// 冷却原因、全池统计一律不给——那是管理员信息，泄露出去等于把池子交出去。
+// 与管理员视图共用 /status，调用方不必为两种身份记两个地址。
+func (h *Handler) userStatus(w http.ResponseWriter, caller apikey.Entry) {
+	now := time.Now()
+	var today, total keyusage.Day
+	var lastActive time.Time
+	rpmUsed := 0
+	if h.cfg.KeyUsage != nil {
+		st := h.cfg.KeyUsage.Stat(caller.ID, now)
+		today, total, lastActive = st.Today, st.Total, st.LastActive
+		rpmUsed = h.cfg.KeyUsage.RPMUsed(caller.ID, now)
+	}
+
+	// 积分只统计该密钥能用的号（Allow 为空 = 全池）。
+	accounts, available := 0, 0
+	var credits, creditsTotal int64
+	for _, s := range h.cfg.Pool.List() {
+		if !callerAllows(caller, s.UID) {
+			continue
+		}
+		accounts++
+		if !s.Disabled && !s.Paused && !s.Cooling {
+			available++
+		}
+		credits += s.Credits
+		creditsTotal += s.CreditsTotal
+	}
+
+	scope := "all"
+	if len(caller.Allow) > 0 {
+		scope = "limited"
+	}
+	// daily_left = -1 表示不限额（与 limit=0 的既有语义一致），0 表示已用尽。
+	dailyLeft := int64(-1)
+	if caller.DailyTokens > 0 {
+		dailyLeft = caller.DailyTokens - today.Tokens()
+		if dailyLeft < 0 {
+			dailyLeft = 0
+		}
+	}
+	models := make([]string, 0, len(caller.Models))
+	for m := range caller.Models {
+		models = append(models, m)
+	}
+	sort.Strings(models)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service": ServiceName,
+		"key": map[string]any{
+			"id":             caller.ID,
+			"name":           caller.Name,
+			"masked":         caller.Masked,
+			"accounts_scope": scope, // all = 全池 / limited = 只用指定账号
+			"min_credit":     caller.MinCredit,
+			"models":         models, // 空 = 不限
+			"content_log":    caller.ContentLog,
+		},
+		"quota": map[string]any{
+			"rpm_used":           rpmUsed,
+			"rpm_limit":          caller.MaxRPM,
+			"daily_tokens_used":  today.Tokens(),
+			"daily_tokens_limit": caller.DailyTokens,
+			"daily_tokens_left":  dailyLeft,
+		},
+		"today": map[string]any{
+			"requests":          today.Requests,
+			"ok":                today.OK,
+			"failed":            today.Failed,
+			"prompt_tokens":     today.Prompt,
+			"completion_tokens": today.Completion,
+			"tokens":            today.Tokens(),
+		},
+		"total": map[string]any{
+			"requests": total.Requests,
+			"tokens":   total.Tokens(),
+		},
+		"credits": map[string]any{
+			"remaining":          credits,
+			"total":              creditsTotal,
+			"accounts":           accounts,
+			"accounts_available": available,
+		},
+		"last_active": lastActive,
+	})
 }
 
 // filterModelsForCaller 按密钥白名单裁剪 /v1/models 列表（保持原顺序）。

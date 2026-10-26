@@ -2,6 +2,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,30 +34,125 @@ func doChat(t *testing.T, h *Handler, apiKey, model string) *httptest.ResponseRe
 	return rec
 }
 
-// 用户密钥不得读全池状态：/status 会暴露账号 uid、积分与冷却原因。
-func TestUserKeyCannotReadStatus(t *testing.T) {
+// /status 按身份分视图：管理员拿全池明细，用户密钥只拿自己那份。
+func TestStatusViewsByRole(t *testing.T) {
+	p := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("u1", 100, 120)
+	p.SetCredits("u2", 900, 1000)
+	tbl := testKeyTable(t, apikey.Key{ID: "alice", Key: "sk-alice", Enabled: true,
+		Accounts: []string{"u2"}, MaxRPM: 60, DailyTokens: 1000})
+	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, sseOK, true
+	}), APIKey: "sk-admin", Keys: tbl})
+
+	// 管理员：全池明细。
+	req := httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer sk-admin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin code=%d body=%s", rec.Code, rec.Body)
+	}
+	var admin map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &admin); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := admin["accounts"]; !ok {
+		t.Fatal("管理员视图应包含 accounts")
+	}
+
+	// 用户密钥：只有自己的额度视图，不能出现账号明细。
+	req = httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("user code=%d body=%s", rec.Code, rec.Body)
+	}
+	var user map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &user); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := user["accounts"]; ok {
+		t.Error("用户视图不得包含 accounts（泄露其它账号 uid / 积分）")
+	}
+	key := user["key"].(map[string]any)
+	if key["id"] != "alice" || key["accounts_scope"] != "limited" {
+		t.Errorf("key=%v", key)
+	}
+	quota := user["quota"].(map[string]any)
+	if quota["rpm_limit"].(float64) != 60 || quota["daily_tokens_limit"].(float64) != 1000 {
+		t.Errorf("quota=%v", quota)
+	}
+	credits := user["credits"].(map[string]any)
+	if credits["remaining"].(float64) != 900 {
+		t.Errorf("credits 应只统计该密钥可用账号（u2=900），得到 %v", credits)
+	}
+	if credits["accounts"].(float64) != 1 {
+		t.Errorf("accounts=%v 应只含 u2", credits["accounts"])
+	}
+
+	// 错误密钥仍然 401。
+	req = httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer sk-nope")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("错误密钥 code=%d want 401", rec.Code)
+	}
+}
+
+// 多密钥启用后，管理密钥不得调用 /v1/*：否则管理员流量会混进密钥账本。
+func TestAdminKeyRejectedOnV1(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	tbl := testKeyTable(t, apikey.Key{ID: "alice", Key: "sk-alice", Enabled: true})
 	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
 		return 200, sseOK, true
 	}), APIKey: "sk-admin", Keys: tbl})
 
-	for _, c := range []struct {
-		name string
-		key  string
-		want int
-	}{
-		{"管理员", "sk-admin", http.StatusOK},
-		{"用户密钥", "sk-alice", http.StatusUnauthorized},
-		{"错误密钥", "sk-nope", http.StatusUnauthorized},
-	} {
-		req := httptest.NewRequest("GET", "/status", nil)
-		req.Header.Set("Authorization", "Bearer "+c.key)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != c.want {
-			t.Errorf("%s: code=%d want %d", c.name, rec.Code, c.want)
-		}
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-admin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("管理密钥调 /v1/models code=%d want 401", rec.Code)
+	}
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Error.Code != "admin_key_not_allowed" {
+		t.Errorf("error.code=%q want admin_key_not_allowed", resp.Error.Code)
+	}
+
+	// 用户密钥照常可用。
+	req = httptest.NewRequest("GET", "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("用户密钥 code=%d body=%s", rec.Code, rec.Body)
+	}
+}
+
+// 未配置 api_keys 时保持单密钥语义：api_key 仍可调 /v1/*（老部署升级不断流）。
+func TestAdminKeyStillWorksOnV1WithoutKeys(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, sseOK, true
+	}), APIKey: "sk-admin"})
+
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-admin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 }
 
@@ -135,10 +231,7 @@ func TestKeyRPMLimit(t *testing.T) {
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("429 应带 Retry-After")
 	}
-	// 管理员不受用户密钥限额影响。
-	if rec := doChat(t, h, "sk-admin", "glm-5.2"); rec.Code != http.StatusOK {
-		t.Fatalf("管理员不应被限额: code=%d", rec.Code)
-	}
+	// 管理员密钥不走 /v1/*（多密钥启用后只保留管理面语义），见 TestAdminKeyRejectedOnV1。
 }
 
 // 每日 token 额度：入口判「今日已用 ≥ 上限」直接 429。

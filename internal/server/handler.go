@@ -162,7 +162,7 @@ func NewHandler(cfg Config) *Handler {
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
-	h.mux.HandleFunc("GET /status", h.withAdmin(h.status))
+	h.mux.HandleFunc("GET /status", h.withStatus(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
@@ -270,12 +270,19 @@ func keyFrom(ctx context.Context) apikey.Entry {
 	return apikey.AdminEntry()
 }
 
-// withAuth 接受任意有效凭证：管理员密钥（api_key / panel.admin_key）或多密钥表里的
-// 启用条目。解析结果写入请求上下文，供选号约束与请求日志使用。
+// withAuth 鉴权 /v1/*：多密钥启用后只接受分发的用户密钥。
+//
+// 为什么管理密钥不能打 /v1/*：一旦 api_key 也能调网关，「这张 key 是谁在用」
+// 就再也答不清——用量统计、密钥额度、正文归档都会混进管理员自己的流量，
+// 而管理员流量按设计不进任何密钥账本。故多密钥启用（api_keys 非空）后，
+// api_key / panel.admin_key 只保留管理面语义（/status 全池视图、/panel/*）。
+//
+// 未配置 api_keys 时保持单密钥语义（api_key 同时是网关密钥），否则老部署
+// 升级后第一次请求就 401。
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		live := h.loadLive()
-		if live.IsAdmin(r) {
+		if live.Keys.Len() == 0 && live.IsAdmin(r) {
 			next(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, apikey.AdminEntry())))
 			return
 		}
@@ -288,18 +295,34 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, e)))
 			return
 		}
+		// 拿着管理密钥来调 /v1/* 是最常见的误用（升级后老客户端配置没换），
+		// 给一句能自解释的话，而不是让人以为密钥抄错了。管理密钥本身是已知的，
+		// 这里不构成信息泄露。
+		if live.Keys.Len() > 0 && (live.APIKey != "" || live.AdminKey != "") && live.IsAdmin(r) {
+			writeOpenAIError(w, http.StatusUnauthorized, "admin_key_not_allowed",
+				"管理密钥只能用于 /status 与 /panel，调用 /v1/* 请使用分发的用户密钥")
+			return
+		}
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 	}
 }
 
-// withAdmin 仅管理员可访问：用户密钥不得读取全池状态（账号 uid / 昵称 / 积分分布）。
-func (h *Handler) withAdmin(next http.HandlerFunc) http.HandlerFunc {
+// withStatus 鉴权 /status：管理员与用户密钥都可访问，但视图不同。
+//
+// 用户密钥只拿「自己那份」（限额、今日用量、可用积分合计）；全池账号明细
+// （uid / 昵称 / 冷却原因 / 积分分布）仍然只有管理员看得到。
+func (h *Handler) withStatus(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !h.loadLive().IsAdmin(r) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "admin key required")
+		live := h.loadLive()
+		if live.IsAdmin(r) {
+			next(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, apikey.AdminEntry())))
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, apikey.AdminEntry())))
+		if e, ok := live.Keys.Resolve(r); ok {
+			next(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, e)))
+			return
+		}
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 	}
 }
 
@@ -328,6 +351,12 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
+	// 用户密钥拿自己那份视图：限额、今日用量、可用积分合计。
+	// 账号明细（uid / 昵称 / 冷却原因）不出现——那是管理员信息。
+	if caller := keyFrom(r.Context()); !caller.Admin {
+		h.userStatus(w, caller)
+		return
+	}
 	total, healthy, cooling, disabled, inFlightFull := h.cfg.Pool.CountsDetailed()
 	sticky := 0
 	if h.cfg.StickyCount != nil {
