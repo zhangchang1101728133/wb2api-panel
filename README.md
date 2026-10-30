@@ -1265,3 +1265,54 @@ sudo chown -R 10001:10001 ./auths ./data ./config.json
 Web 面板「账号池与流量治理」可分别配置策略和账号顺序，保存后热生效。闲置补偿与快过期积分加权仅影响加权随机。无地区上下文的旧 Pool 入口保留原行为；策略不会改变路由或自动跨地区借号。
 
 本功能不假定国际版免费模型已采用五小时限额；限流及恢复时间继续依据现有上游识别逻辑处理，不硬编码五小时。
+
+---
+
+## Anthropic 协议（Claude Code / OpenCode）
+
+`POST /v1/messages` 与 `/v1/chat/completions` **等价**，网关里的**任意模型**都能通过 Anthropic 协议调用：
+请求会被翻成 OpenAI 交给既有管线（选号 / 会话粘性 / 熔断 / 计费全部复用），响应（含 SSE）再翻回 Anthropic 形态。
+
+- 鉴权：`x-api-key: <用户密钥>` 或 `Authorization: Bearer <用户密钥>`
+- 模型：`cn:xxx` / `global:xxx` 原样使用；`claude-*` 之类的名字会落到 `cn:auto`
+- 另外提供 `POST /v1/messages/count_tokens`（粗略估算，仅供客户端做上下文预算）
+
+```bash
+# 非流式
+curl -s http://127.0.0.1:7863/v1/messages \
+  -H "x-api-key: $KEY" -H "content-type: application/json" \
+  -d '{"model":"cn:deepseek-v4-flash","max_tokens":128,"messages":[{"role":"user","content":"你好"}]}'
+
+# 流式
+curl -sN http://127.0.0.1:7863/v1/messages \
+  -H "x-api-key: $KEY" -H "content-type: application/json" \
+  -d '{"model":"cn:deepseek-v4-flash","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"数到三"}]}'
+```
+
+### Claude Code
+
+```bash
+export ANTHROPIC_BASE_URL=http://8.140.249.127:7863
+export ANTHROPIC_AUTH_TOKEN=sk-你的用户密钥
+export ANTHROPIC_MODEL=cn:deepseek-v4-flash    # 任意网关模型；不设则用 cn:auto
+claude
+```
+
+### OpenCode
+
+`opencode.json` 里用 anthropic provider，`baseURL` 指向网关即可：
+
+```json
+{
+  "provider": {
+    "wb2api": {
+      "npm": "@ai-sdk/anthropic",
+      "options": { "baseURL": "http://8.140.249.127:7863", "apiKey": "sk-你的用户密钥" },
+      "models": { "cn:deepseek-v4-flash": {}, "global:gpt-6-astra": {} }
+    }
+  }
+}
+```
+
+> 工具调用（`tool_use` / `tool_result`）、system、多模态图片、流式增量都已支持；
+> `web_search` 这类 server tool 会被忽略（网关没有对应能力）。
