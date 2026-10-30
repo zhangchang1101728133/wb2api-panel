@@ -271,20 +271,40 @@ func TestMessagesSearchUpstreamErrorShape(t *testing.T) {
 	}
 }
 
-// TestMessagesRouteDoesNotShadowV1Messages 断言搜索端点没有占用 /v1/messages
-// （该路径保留给 Anthropic 模型对话）。
+// TestMessagesRouteDoesNotShadowV1Messages /v1/messages 现在是 Anthropic 对话入口
+// （anthropic.go），走既有 chat 管线并把响应翻回 Anthropic 形态；
+// 搜索固定走 /v1/search/messages。
 func TestMessagesRouteDoesNotShadowV1Messages(t *testing.T) {
 	up := newSearchUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Error("不得打上游")
+		// 网关对上游强制 stream，非流式由服务端聚合；这里按 SSE 回。
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-1\",\"model\":\"hy3\",\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	})
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream: up})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(`{}`)))
+	body := `{"model":"claude-sonnet-4-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("POST /v1/messages code=%d want 404（该路径留给模型对话）", rec.Code)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Type    string `json:"type"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("响应必须是 JSON: %v", err)
+	}
+	if out.Type != "message" || len(out.Content) == 0 || out.Content[0].Text != "pong" {
+		t.Errorf("响应形态不对: %s", rec.Body.String())
 	}
 }
 

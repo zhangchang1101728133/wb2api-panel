@@ -161,6 +161,10 @@ func NewHandler(cfg Config) *Handler {
 	// 联网搜索（Anthropic Messages 兼容形态，见 messages.go）。路径刻意不占用
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
+	// Anthropic Messages 对话协议（Claude Code / Anthropic SDK 直连用）。
+	// 与上面的搜索端点互不干扰：搜索挂 /v1/search/messages。
+	h.mux.HandleFunc("POST /v1/messages", h.withAuth(h.anthropicMessages))
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAuth(h.anthropicCountTokens))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	// 额度查询：任何密钥都能调（含管理密钥），返回按该密钥权限算出的剩余积分。
 	// /v1/usage 是同一份数据的别名，对齐 CC Switch 内置 Sub2API 模板的固定路径，

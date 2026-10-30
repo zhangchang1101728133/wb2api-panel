@@ -170,6 +170,11 @@ func (t *Table) Resolve(r *http.Request) (Entry, bool) {
 	if strings.HasPrefix(authz, bearerPrefix) {
 		tok = authz[len(bearerPrefix):]
 	}
+	// Anthropic 客户端（Claude Code 等）用 x-api-key 而不是 Authorization，
+	// 两套头都认；Authorization 优先，避免误伤既有客户端。
+	if tok == "" {
+		tok = strings.TrimSpace(r.Header.Get("x-api-key"))
+	}
 	d := sha256.Sum256([]byte(tok))
 	// 全表比较：不 break，命中位置不影响耗时形状。
 	hit := -1
